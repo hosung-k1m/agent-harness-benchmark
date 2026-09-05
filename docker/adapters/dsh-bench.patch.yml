@@ -1,0 +1,21 @@
+# Applied to the supplied headless profile.  This is deliberately a primary
+# llm-pi-ai/openai-codex route, not DSH's Codex subagent plugin.
+- id: agent-default-model
+  config:
+    provider: openai-codex
+    model: gpt-5.6-luna
+    reasoningEffort: low
+- id: llm-pi-ai
+  config:
+    providers:
+      openai-codex:
+        retryPolicy:
+          mode: normal
+          maxRetries: 0
+- id: session-persistence-jsonl
+  config:
+    root: /home/bench/.dsh/sessions
+    compression: none
+    packChunks: false
+- id: session-telemetry-otel
+  disabled: true

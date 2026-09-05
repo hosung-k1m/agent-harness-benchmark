@@ -1,0 +1,11 @@
+{
+  "id": "dsh-default-codex",
+  "display_name": "DSH default + Codex",
+  "image": "agent-harness-benchmark:latest",
+  "adapter": "/opt/bench/dsh-adapter.sh",
+  "model": "gpt-5.6-luna",
+  "reasoning_effort": "low",
+  "network_policy_id": "unrestricted-egress-v1",
+  "protected_paths": ["README.md", "tests/"],
+  "limits": {"cpus": 2, "memory_bytes": 4294967296, "pids": 256, "tmpfs_bytes": 1073741824, "wall_seconds": 900}
+}

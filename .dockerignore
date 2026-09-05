@@ -1,0 +1,6 @@
+.git
+.bench
+.rp1
+cases/*/hidden
+**/__pycache__
+docker/adapters/test_*.py
