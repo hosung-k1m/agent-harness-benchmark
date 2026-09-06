@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#111827">
+    <title>Harness Bench</title>
+    <link rel="stylesheet" href="/app.css?v=3">
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to main content</a>
+    <header class="topbar">
+      <a class="brand" href="/" aria-label="Harness Bench home"><span aria-hidden="true">◈</span> Harness Bench</a>
+      <div class="connection" id="connection" role="status"><i></i><span>Connecting</span></div>
+    </header>
+    <main id="main" class="shell">
+      <section class="hero">
+        <div><p class="eyebrow">LOCAL AGENT EVALUATION</p><h1>Run a fair benchmark.</h1><p class="lede">Choose harnesses and cases. Every pairing runs as its own isolated container.</p></div>
+        <button class="secondary" type="button" id="show-import">Import a case <span aria-hidden="true">→</span></button>
+      </section>
+
+      <section class="launcher card" aria-labelledby="launch-title">
+        <div class="section-heading"><div><p class="eyebrow">NEW BENCHMARK</p><h2 id="launch-title">Configure attempts</h2></div><output id="attempt-count" class="attempt-count">0 attempts</output></div>
+        <div class="picker-grid">
+          <fieldset><legend>1. Harnesses</legend><p class="help">Select one or more agent harnesses.</p><div class="choice-list" id="harness-list" aria-live="polite"><p class="empty">Loading harnesses…</p></div></fieldset>
+          <fieldset><legend>2. Test cases</legend><p class="help">Each selected case runs independently per harness.</p><div class="choice-list" id="case-list" aria-live="polite"><p class="empty">Loading test cases…</p></div></fieldset>
+        </div>
+        <div class="launch-row"><p id="launch-summary">Select a harness and a test case to continue.</p><button class="primary" id="start-run" disabled type="button">Start benchmark <span aria-hidden="true">↗</span></button></div>
+      </section>
+
+      <section class="dashboard" aria-labelledby="dashboard-title">
+        <div class="section-heading"><div><p class="eyebrow">LIVE DASHBOARD</p><h2 id="dashboard-title">Attempts</h2></div><button class="text-button" id="refresh" type="button">Refresh</button></div>
+        <div class="metrics" aria-label="Benchmark summary"><div><span>Running</span><strong id="metric-running">0</strong></div><div><span>Completed</span><strong id="metric-completed">0</strong></div><div><span>Passed</span><strong id="metric-passed">0</strong></div><div><span>Failed</span><strong id="metric-failed">0</strong></div><div><span>Input tokens</span><strong id="metric-input-tokens">—</strong></div><div><span>Output tokens</span><strong id="metric-output-tokens">—</strong></div><div><span>Total tokens</span><strong id="metric-tokens">—</strong></div><div><span>Longest elapsed</span><strong id="metric-elapsed">—</strong></div></div>
+        <div class="filters" role="group" aria-label="Attempt filters"><button class="filter active" data-filter="all" type="button">All <span id="filter-all">0</span></button><button class="filter" data-filter="active" type="button">Active <span id="filter-active">0</span></button><button class="filter" data-filter="finished" type="button">Finished <span id="filter-finished">0</span></button></div>
+        <div id="attempts" class="attempts" aria-live="polite"><div class="empty-state"><span aria-hidden="true">⌁</span><h3>No attempts yet</h3><p>Choose harnesses and cases above to begin.</p></div></div>
+      </section>
+    </main>
+
+    <dialog id="import-dialog" aria-labelledby="import-title">
+      <form id="import-form" method="dialog">
+        <div class="dialog-heading"><div><p class="eyebrow">TEST CASE LIBRARY</p><h2 id="import-title">Import a test case</h2></div><button class="icon-button" type="button" data-close-dialog aria-label="Close import dialog">×</button></div>
+        <p class="help">A case combines the prompt with a repository archive or files. The source is copied before every isolated run.</p>
+        <label>Case name<input required name="name" maxlength="80" pattern="[a-z0-9][a-z0-9_-]*" placeholder="e.g. parser-edge-cases"><small class="input-help">Lowercase letters, numbers, hyphens, and underscores.</small></label>
+        <label>Agent prompt<textarea required name="prompt" rows="6" placeholder="Describe the task the selected agents should complete…"></textarea></label>
+        <fieldset class="source"><legend>Source</legend><label><input type="radio" name="source_type" value="archive" checked> Upload repository archive</label><label><input type="radio" name="source_type" value="files"> Upload files</label><label><input type="radio" name="source_type" value="repo_url"> Git repository URL</label></fieldset>
+        <label id="archive-field">Repository archive <input type="file" name="archive" accept=".zip,.tar,.gz,.tgz"></label>
+        <label id="files-field" hidden>Repository folder <input type="file" name="files" webkitdirectory directory multiple><small class="input-help">Select a folder; its directory layout is retained.</small></label>
+        <label id="repo-field" hidden>Repository URL <input type="url" name="repository" placeholder="https://github.com/org/repository"></label>
+        <p class="form-error" id="import-error" role="alert"></p>
+        <div class="dialog-actions"><button class="secondary" type="button" data-close-dialog>Cancel</button><button class="primary" type="submit">Import test case</button></div>
+      </form>
+    </dialog>
+    <template id="attempt-template"><article class="attempt card"><div class="attempt-head"><div><span class="status"></span><h3 class="attempt-title"></h3><p class="attempt-subtitle"></p></div><button class="details" type="button" aria-expanded="false">Details <span aria-hidden="true">⌄</span></button></div><dl class="attempt-stats"><div><dt>Elapsed</dt><dd data-stat="elapsed">—</dd></div><div><dt>Input tokens</dt><dd data-stat="input-tokens">—</dd></div><div><dt>Output tokens</dt><dd data-stat="output-tokens">—</dd></div><div><dt>Cached input</dt><dd data-stat="cached-input-tokens">—</dd></div><div><dt>Reasoning output</dt><dd data-stat="reasoning-output-tokens">—</dd></div><div><dt>Result</dt><dd data-stat="result">—</dd></div></dl><div class="attempt-details" hidden><dl class="attempt-meta"><div><dt>Usage source</dt><dd data-stat="token-quality">—</dd></div><div><dt>Model</dt><dd data-stat="model">—</dd></div><div><dt>Reasoning effort</dt><dd data-stat="reasoning-effort">—</dd></div><div><dt>Exit code</dt><dd data-stat="exit-code">—</dd></div></dl><div class="failure" hidden></div><pre class="log" aria-label="Attempt log"></pre><a class="result-link" target="_blank" rel="noopener" hidden>Open saved result <span aria-hidden="true">↗</span></a></div></article></template>
+    <script src="/app.js?v=3" defer></script>
+  </body>
+</html>

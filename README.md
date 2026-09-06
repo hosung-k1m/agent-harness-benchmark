@@ -41,6 +41,41 @@ hash.
 ./bench compare --case slugify-v1 --trials 3
 ```
 
+## Web dashboard
+
+Build the CLI, then start the local dashboard from the repository root:
+
+```sh
+go build -o bench ./cmd/bench
+./bench serve
+```
+
+Open [http://127.0.0.1:8080](http://127.0.0.1:8080). Select one or more
+harnesses and test cases, then start the benchmark. Every selected harness ×
+case pairing is queued as an independent attempt; concurrent attempts receive
+separate containers, networks, homes, and workspaces. Use `--workers N` to set
+the concurrency limit and `--addr` to choose another listen address. The
+default is loopback-only.
+
+The live dashboard updates attempt status and elapsed time every second. Token
+counts remain marked as pending until the provider emits its normalized usage;
+they are never estimated. Completed batches are restored from
+`.bench/batches/` when the server restarts.
+
+Use **Import a case** to add a prompt plus one of:
+
+- a `.zip`, `.tar`, `.tar.gz`, or `.tgz` repository archive;
+- a repository folder selected in the browser; or
+- a credential-free HTTPS Git URL.
+
+Imported cases are staged and validated before being moved into
+`cases/<case-id>/fixture`, with their prompt at `cases/<case-id>/prompt.txt`.
+Archive traversal, links and special files, duplicate paths, oversized files,
+and oversized imports are rejected. Imported cases do not gain trusted hidden
+tests; their resulting workspace is exported without running the verifier. A
+manually authored case with `hidden/` uses the trusted verifier just like
+`slugify-v1`.
+
 Preflight creates a disposable container and validates the explicit command or
 profile selection, ephemeral credentials/home/session, noninteractive task,
 and a nonce workspace edit. Smoke requires a current preflight and asks the

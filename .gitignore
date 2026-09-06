@@ -2,3 +2,6 @@ __pycache__/
 *.py[cod]
 .bench/
 bench
+!cmd/
+!cmd/bench/
+!cmd/bench/*.go
