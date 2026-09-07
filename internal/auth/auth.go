@@ -67,6 +67,23 @@ func (d DSH) Material() ([]Material, error) {
 	return []Material{{Target: "/home/bench/.dsh/.credentials.yaml", Data: seed, Secrets: yamlSecrets(seed)}}, nil
 }
 
+// DSHCodex supplies the DSH parent OAuth record and Codex plugin credentials.
+// The sources are optional independently only for tests; production defaults
+// resolve both documented login locations.
+type DSHCodex struct{ DSHSource, CodexSource string }
+
+func (d DSHCodex) Material() ([]Material, error) {
+	dsh, err := (DSH{Source: d.DSHSource}).Material()
+	if err != nil {
+		return nil, err
+	}
+	codex, err := (Codex{Source: d.CodexSource}).Material()
+	if err != nil {
+		return nil, err
+	}
+	return append(dsh, codex...), nil
+}
+
 func jsonSecrets(v any) [][]byte {
 	var out [][]byte
 	var walk func(any)

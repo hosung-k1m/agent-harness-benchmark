@@ -76,3 +76,18 @@ func TestDSHRejectsNonOAuthRecordKind(t *testing.T) {
 		t.Fatal("accepted non-OAuth DSH credential")
 	}
 }
+
+func TestDSHCodexSeedsBothCredentialTargets(t *testing.T) {
+	dir := t.TempDir()
+	dsh := filepath.Join(dir, "dsh.yaml")
+	codex := filepath.Join(dir, "auth.json")
+	_ = os.WriteFile(dsh, []byte("version: 1\nrecords:\n  llm-pi-ai/openai-codex:\n    kind: grant\n    token: long-dsh-token-value\n"), 0600)
+	_ = os.WriteFile(codex, []byte(`{"auth_mode":"chatgpt","tokens":{"access_token":"long-codex-token-value"}}`), 0600)
+	m, err := (DSHCodex{DSHSource: dsh, CodexSource: codex}).Material()
+	if err != nil || len(m) != 2 {
+		t.Fatalf("materials=%d err=%v", len(m), err)
+	}
+	if m[0].Target != "/home/bench/.dsh/.credentials.yaml" || m[1].Target != "/home/bench/.codex/auth.json" {
+		t.Fatalf("unexpected targets: %#v", m)
+	}
+}

@@ -90,7 +90,7 @@ func validKind(kind string) bool { return kind == "preflight" || kind == "smoke"
 // Variant ids are deliberately filename-safe; state callers never get to
 // smuggle traversal components into a state path.
 func validVariant(id string) bool {
-	return id == "codex-cli" || id == "dsh-default-codex"
+	return id == "codex-cli" || id == "dsh-default-codex" || id == "dsh-modified-codex"
 }
 
 func validHash(s string) bool {

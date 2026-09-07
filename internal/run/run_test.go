@@ -128,3 +128,20 @@ func TestCollectsAdapterOutputThroughTarStream(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestPassesSelectedModelAndEffortAsAdapterArguments(t *testing.T) {
+	f := &fakeEngine{result: model.Result{Status: model.StatusCompleted, Usage: model.Usage{TokenQuality: model.TokenUnavailable}}}
+	v := testVariant()
+	v.Model, v.ReasoningEffort = "gpt-5.6-terra", "ultra"
+	r := Runner{Engine: f, ArtifactRoot: t.TempDir(), Credential: func(string) auth.Provider { return fakeAuth{} }}
+	_ = r.Run(context.Background(), v, Request{Fixture: t.TempDir()})
+	found := false
+	for _, call := range f.calls {
+		if len(call) > 0 && strings.Contains(strings.Join(call, " "), "/opt/bench/codex") && strings.Contains(strings.Join(call, " "), "gpt-5.6-terra ultra") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("selected model/effort absent from adapter invocation: %#v", f.calls)
+	}
+}

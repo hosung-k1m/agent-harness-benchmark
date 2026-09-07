@@ -1,151 +1,28 @@
-(() => {
-  "use strict";
-  const $ = (selector, root = document) => root.querySelector(selector);
-  const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
-  const state = { catalog: { harnesses: [], cases: [] }, attempts: new Map(), filter: "all", stream: null, timer: null };
-  const active = status => ["queued", "running"].includes(status);
-  const number = value => typeof value === "number" ? value.toLocaleString() : "—";
-  const elapsed = milliseconds => {
-    if (milliseconds == null || milliseconds < 0) return "—";
-    const seconds = Math.floor(milliseconds / 1000), minutes = Math.floor(seconds / 60);
-    return minutes ? `${minutes}m ${String(seconds % 60).padStart(2, "0")}s` : `${seconds}s`;
-  };
-  const currentElapsed = attempt => active(attempt.status) && attempt.started_at
-    ? Date.now() - new Date(attempt.started_at).getTime() : (attempt.elapsed_ms ?? attempt.elapsed_millis);
-  const totalTokens = usage => {
-    if (!usage || usage.token_quality === "unavailable") return null;
-    // Cached input is included in input and reasoning is included in output; never double-count either.
-    const values = [usage.input_tokens, usage.output_tokens];
-    return values.some(value => typeof value !== "number") ? null : values.reduce((sum, value) => sum + value, 0);
-  };
-  const tokenQuality = usage => ({ provider_reported: "Provider-reported", client_estimated: "Client-estimated", unavailable: "Unavailable" })[usage?.token_quality] || "Awaiting provider report";
-  const tokenMetric = (usage, field, status) => {
-    if (typeof usage?.[field] === "number") return number(usage[field]);
-    return active(status) ? "Awaiting provider report" : "—";
-  };
-  const usageFor = attempt => attempt.result?.usage || attempt.usage;
-  const sumUsage = (attempts, field) => {
-    const values = attempts.map(usageFor).map(usage => usage?.[field]).filter(value => typeof value === "number");
-    return values.length ? number(values.reduce((sum, value) => sum + value, 0)) : "—";
-  };
-  const statusLabel = status => ({ queued: "Queued", running: "Running", completed: "Completed", failed: "Failed", timed_out: "Timed out", unsupported: "Unsupported", infrastructure_invalid: "Infrastructure invalid", interrupted: "Interrupted" })[status] || "Pending";
-
-  async function request(path, options) {
-    const response = await fetch(path, { headers: options?.body instanceof FormData ? {} : { "Content-Type": "application/json" }, ...options });
-    if (!response.ok) { let message = `Request failed (${response.status})`; try { message = (await response.json()).error || message; } catch (_) {} throw new Error(message); }
-    return response.status === 204 ? null : response.json();
-  }
-  function setConnection(kind, label) { const node = $("#connection"); node.className = `connection ${kind}`; $("span", node).textContent = label; }
-  function renderCatalog() {
-    const selectedHarnesses = new Set($$("#harness-list input:checked").map(input => input.value));
-    const selectedCases = new Set($$("#case-list input:checked").map(input => input.value));
-    $("#harness-list").replaceChildren(...state.catalog.harnesses.map(item => choice(item, selectedHarnesses.has(item.id))));
-    const caseItems = state.catalog.cases.map(item => choice(item, selectedCases.has(item.id)));
-    $("#case-list").replaceChildren(...(caseItems.length ? caseItems : [empty("No test cases found. Import one to get started.")]));
-    updateLaunch();
-  }
-  function choice(item, checked) {
-    const label = document.createElement("label"); label.className = `choice${item.available === false ? " disabled" : ""}`;
-    label.innerHTML = `<input type="checkbox" value="${escapeHTML(item.id)}" ${checked ? "checked" : ""} ${item.available === false ? "disabled" : ""}><span><b>${escapeHTML(item.name || item.id)}</b><small>${escapeHTML(item.description || item.prompt_preview || (item.source_type ? `${item.source_type} source` : item.id))}</small></span>`;
-    $("input", label).addEventListener("change", updateLaunch); return label;
-  }
-  function updateLaunch() {
-    const h = $$("#harness-list input:checked").length, c = $$("#case-list input:checked").length, count = h * c;
-    $("#attempt-count").textContent = `${count} attempt${count === 1 ? "" : "s"}`;
-    $("#start-run").disabled = !count;
-    $("#launch-summary").textContent = count ? `${h} harness${h === 1 ? "" : "es"} × ${c} case${c === 1 ? "" : "s"}. Each attempt gets a fresh container.` : "Select a harness and a test case to continue.";
-  }
-  function escapeHTML(value) { const div = document.createElement("div"); div.textContent = value || ""; return div.innerHTML; }
-  function empty(message) { const node = document.createElement("p"); node.className = "empty"; node.textContent = message; return node; }
-
-  function renderAttempts() {
-    const attempts = [...state.attempts.values()].sort((a, b) => new Date(b.started_at || b.created_at || 0) - new Date(a.started_at || a.created_at || 0));
-    const visible = attempts.filter(attempt => state.filter === "all" || (state.filter === "active" ? active(attempt.status) : !active(attempt.status)));
-    const parent = $("#attempts");
-    if (!visible.length) { parent.innerHTML = `<div class="empty-state"><span aria-hidden="true">⌁</span><h3>${attempts.length ? "No matching attempts" : "No attempts yet"}</h3><p>${attempts.length ? "Try another filter." : "Choose harnesses and cases above to begin."}</p></div>`; return; }
-    parent.replaceChildren(...visible.map(attemptCard)); renderMetrics(attempts);
-  }
-  function attemptCard(attempt) {
-    const node = $("#attempt-template").content.firstElementChild.cloneNode(true);
-    const status = attempt.status || "queued", usage = attempt.result?.usage || attempt.usage, tokenCount = totalTokens(usage), result = attempt.result || {};
-    $(".status", node).classList.add(status); $(".status", node).setAttribute("title", statusLabel(status));
-    $(".attempt-title", node).textContent = `${attempt.harness_name || attempt.harness_id || "Harness"} · ${attempt.case_name || attempt.case_id || "Test case"}`;
-    $(".attempt-subtitle", node).textContent = `${statusLabel(status)}${attempt.id ? ` · ${attempt.id}` : ""}`;
-    $("[data-stat=elapsed]", node).textContent = elapsed(currentElapsed(attempt));
-    $("[data-stat=input-tokens]", node).textContent = tokenMetric(usage, "input_tokens", status);
-    $("[data-stat=output-tokens]", node).textContent = tokenMetric(usage, "output_tokens", status);
-    $("[data-stat=cached-input-tokens]", node).textContent = tokenMetric(usage, "cached_input_tokens", status);
-    $("[data-stat=reasoning-output-tokens]", node).textContent = tokenMetric(usage, "reasoning_output_tokens", status);
-    const verifier = attempt.verifier_passed ?? attempt.result?.verifier_passed;
-    $("[data-stat=result]", node).textContent = verifier === true ? "Passed" : verifier === false ? "Failed" : statusLabel(status);
-    $("[data-stat=token-quality]", node).textContent = tokenCount == null && active(status) ? "Awaiting provider report" : tokenQuality(usage);
-    $("[data-stat=model]", node).textContent = result.model || attempt.model || "—";
-    $("[data-stat=reasoning-effort]", node).textContent = result.reasoning_effort || attempt.reasoning_effort || "—";
-    $("[data-stat=exit-code]", node).textContent = typeof result.exit_code === "number" ? result.exit_code : "—";
-    const details = $(".attempt-details", node), toggle = $(".details", node), log = $(".log", node);
-    log.textContent = Array.isArray(attempt.logs) && attempt.logs.length ? attempt.logs.join("\n") : "Raw provider output is not retained. Status, elapsed time, and provider usage appear above.";
-    if (attempt.failure_reason || attempt.error || attempt.result?.failure_reason) { const failure = $(".failure", node); failure.hidden = false; failure.textContent = attempt.failure_reason || attempt.error || attempt.result?.failure_reason; }
-    if (attempt.result_url) { const link = $(".result-link", node); link.hidden = false; link.href = attempt.result_url; }
-    toggle.addEventListener("click", () => { details.hidden = !details.hidden; toggle.setAttribute("aria-expanded", String(!details.hidden)); toggle.innerHTML = `${details.hidden ? "Details" : "Hide details"} <span aria-hidden="true">⌄</span>`; });
-    return node;
-  }
-  function renderMetrics(attempts) {
-    const running = attempts.filter(a => active(a.status)), complete = attempts.filter(a => !active(a.status));
-    const knownTokens = attempts.map(a => totalTokens(a.result?.usage || a.usage)).filter(v => v != null);
-    const passed = complete.filter(a => (a.verifier_passed ?? a.result?.verifier_passed) === true);
-    const failed = complete.filter(a => (a.verifier_passed ?? a.result?.verifier_passed) === false || ["failed", "timed_out", "infrastructure_invalid", "unsupported", "interrupted"].includes(a.status));
-    $("#metric-running").textContent = running.length; $("#metric-completed").textContent = complete.length;
-    $("#metric-passed").textContent = passed.length; $("#metric-failed").textContent = failed.length;
-    $("#metric-input-tokens").textContent = sumUsage(attempts, "input_tokens");
-    $("#metric-output-tokens").textContent = sumUsage(attempts, "output_tokens");
-    $("#metric-tokens").textContent = knownTokens.length ? number(knownTokens.reduce((a,b) => a + b, 0)) : "—";
-    const elapsedMs = attempts.map(currentElapsed).filter(v => typeof v === "number"); $("#metric-elapsed").textContent = elapsedMs.length ? elapsed(Math.max(...elapsedMs)) : "—";
-    $("#filter-all").textContent = attempts.length; $("#filter-active").textContent = running.length; $("#filter-finished").textContent = complete.length;
-  }
-  function mergeAttempt(update) {
-    if (!update || !update.id) return;
-    update = { ...update, harness_id: update.harness_id || update.variant_id, elapsed_ms: update.elapsed_ms ?? update.elapsed_millis };
-    const old = state.attempts.get(update.id) || {};
-    state.attempts.set(update.id, { ...old, ...update, usage: { ...(old.usage || {}), ...(update.usage || {}) }, logs: update.logs || old.logs || [] });
-    renderAttempts();
-  }
-  async function load() {
-    try {
-      const [catalog, runs] = await Promise.all([request("/api/catalog"), request("/api/runs")]);
-      state.catalog = catalog || state.catalog;
-      const batches = Array.isArray(runs) ? runs : [runs]; batches.flatMap(batch => batch?.attempts || []).forEach(mergeAttempt);
-      renderCatalog(); renderAttempts(); setConnection("online", "Live");
-    } catch (error) { setConnection("offline", "Offline"); console.warn(error); $("#harness-list").replaceChildren(empty("The dashboard service is unavailable.")); $("#case-list").replaceChildren(empty("The dashboard service is unavailable.")); }
-  }
-  function subscribe() {
-    if (!("EventSource" in window)) return;
-    state.stream = new EventSource("/api/events");
-    state.stream.onopen = () => setConnection("online", "Live");
-    state.stream.onerror = () => setConnection("offline", "Reconnecting");
-    ["attempt", "progress"].forEach(type => state.stream.addEventListener(type, event => { try { mergeAttempt(JSON.parse(event.data).attempt); } catch (_) {} }));
-    state.stream.addEventListener("log", event => { try { const update = JSON.parse(event.data), attempt = state.attempts.get(update.attempt_id); if (attempt) { attempt.logs = [...(attempt.logs || []), update.line].slice(-300); renderAttempts(); } } catch (_) {} });
-  }
-  async function start() {
-    const harness_ids = $$("#harness-list input:checked").map(input => input.value), case_ids = $$("#case-list input:checked").map(input => input.value), button = $("#start-run");
-    button.disabled = true; button.textContent = "Starting…";
-    try { const result = await request("/api/runs", { method: "POST", body: JSON.stringify({ harness_ids, case_ids }) }); (result.attempts || []).forEach(mergeAttempt); state.filter = "all"; $$(".filter").forEach(x => x.classList.toggle("active", x.dataset.filter === "all")); }
-    catch (error) { alert(error.message); } finally { button.textContent = "Start benchmark ↗"; updateLaunch(); }
-  }
-  function setupImport() {
-    const dialog = $("#import-dialog"), form = $("#import-form"); $("#show-import").addEventListener("click", () => dialog.showModal());
-    $$('[data-close-dialog]', dialog).forEach(button => button.addEventListener("click", () => dialog.close()));
-    $$('input[name="source_type"]', form).forEach(input => input.addEventListener("change", () => { ["archive", "files", "repo"].forEach(name => $(`#${name}-field`, form).hidden = input.value !== (name === "repo" ? "repo_url" : name)); }));
-    form.addEventListener("submit", async event => {
-      event.preventDefault(); const submit = $("button[type=submit]", form), error = $("#import-error", form), data = new FormData(form), source = data.get("source_type"); data.set("id", data.get("name")); error.textContent = "";
-      if (source === "files") { const files = [...form.elements.files.files]; if (!files.length) { error.textContent = "Choose at least one file."; return; } data.set("file_paths", JSON.stringify(files.map(file => { const path = file.webkitRelativePath || file.name; const slash = path.indexOf("/"); return slash < 0 ? path : path.slice(slash + 1); }))); }
-      if (source === "archive" && !form.elements.archive.files.length) { error.textContent = "Choose a repository archive."; return; }
-      if (source === "repo_url") { try { if (new URL(form.elements.repository.value).protocol !== "https:") throw new Error(); } catch (_) { error.textContent = "Enter an HTTPS repository URL."; return; } }
-      submit.disabled = true; submit.textContent = "Importing…";
-      try { const imported = await request("/api/cases", { method: "POST", body: data }); const item = imported.case || imported; state.catalog.cases.push({ ...item, name: item.name || item.id, prompt_preview: item.prompt_preview || item.prompt, source_type: item.source_type || source }); renderCatalog(); dialog.close(); form.reset(); }
-      catch (err) { error.textContent = err.message; } finally { submit.disabled = false; submit.textContent = "Import test case"; }
-    });
-  }
-  $("#start-run").addEventListener("click", start); $("#refresh").addEventListener("click", load);
-  $$(".filter").forEach(button => button.addEventListener("click", () => { state.filter = button.dataset.filter; $$(".filter").forEach(item => item.classList.toggle("active", item === button)); renderAttempts(); }));
-  setupImport(); load(); subscribe(); state.timer = setInterval(() => { if ([...state.attempts.values()].some(a => active(a.status))) renderAttempts(); }, 1000);
+(() => { "use strict";
+const $=(s,r=document)=>r.querySelector(s),$$=(s,r=document)=>[...r.querySelectorAll(s)],COMPARE="/api/trajectory-comparison";
+const state={catalog:{harnesses:[],cases:[]},attempts:new Map(),filter:"all",playback:null,compare:new Set()};
+const active=s=>["queued","running"].includes(s), deepSeek=a=>/dsh|deepseek/i.test(`${a.harness_id||a.variant_id||""} ${a.harness_name||a.display_name||a.name||""}`), captured=a=>a.trajectory_available===true, dsh=captured, el=(t,v,c)=>{let e=document.createElement(t);e.textContent=v;if(c)e.className=c;return e}, n=v=>typeof v==="number"?v.toLocaleString():"—", dur=v=>typeof v==="number"&&v>=0?`${Math.floor(v/60000)?Math.floor(v/60000)+"m ":""}${Math.floor(v/1000)%60}s`:"—", use=a=>a.result?.usage||a.usage||{};
+async function api(path,o){let r=await fetch(path,{headers:o?.body instanceof FormData?{}:{"Content-Type":"application/json"},...o});if(!r.ok){let x=`Request failed (${r.status})`;try{x=(await r.json()).error||x}catch(_){}throw Error(x)}return r.status===204?null:r.json()}
+const picks=()=>$$('#harness-list input:checked').map(x=>x.value), cases=()=>$$('#case-list input:checked').map(x=>x.value), models=h=>(h.supported_models?.map(x=>x.id||x.model)||h.capabilities?.models||h.models||h.available_models||(h.model?[h.model]:[])), efforts=(h,m)=>{let supported=h.supported_models?.find(x=>(x.id||x.model)===m);if(supported)return supported.reasoning_efforts||[];let x=h.capabilities?.reasoning_efforts_by_model||h.reasoning_efforts_by_model||h.reasoning_efforts;return Array.isArray(x)?x:(x?.[m]||(h.model===m&&h.reasoning_effort?[h.reasoning_effort]:[]))};
+function option(select,values,placeholder,preferred){let old=select.value,selected=values.includes(old)?old:(values.includes(preferred)?preferred:values[0]);select.replaceChildren();if(!values.length)select.append(el("option",placeholder));values.forEach(v=>{let o=el("option",v);o.value=v;o.selected=v===selected;select.append(o)});select.disabled=!values.length}
+function configs(){let hs=state.catalog.harnesses.filter(x=>picks().includes(x.id)),m=$("#model-select"),r=$("#reasoning-select"),sets=hs.map(models).filter(x=>x.length),ms=hs.length&&sets.length?sets[0].filter(x=>sets.every(y=>y.includes(x))):[];option(m,ms,hs.length?"No compatible models":"Select a harness",hs[0]?.model);let es=hs.map(x=>efforts(x,m.value)).filter(x=>x.length),rs=es.length?es[0].filter(x=>es.every(y=>y.includes(x))):[];option(r,rs,hs.length?"No compatible reasoning levels":"Select a model",hs[0]?.reasoning_effort);launch()}
+function harness(h,checked){let l=document.createElement("label"),i=document.createElement("input"),s=document.createElement("span");l.className=`harness-choice${h.available===false?" disabled":""}`;i.type="checkbox";i.value=h.id;i.checked=checked;i.disabled=h.available===false;i.onchange=configs;s.append(el("b",h.display_name||h.name||h.id),el("small",h.description||models(h).join(", ")||"No model available"),el("em",captured(h)?"Trajectory telemetry + playback":"Trajectory unavailable",`telemetry-note${captured(h)?"":" unavailable"}`));l.append(i,s);return l}
+function choice(c,checked){let l=document.createElement("label"),i=document.createElement("input"),s=document.createElement("span");l.className="choice";i.type="checkbox";i.value=c.id;i.checked=checked;i.onchange=launch;s.append(el("b",c.name||c.id),el("small",c.prompt_preview||c.description||c.id));l.append(i,s);return l}
+function catalog(){let h=new Set(picks()),c=new Set(cases()),order={"dsh-default-codex":0,"dsh-modified-codex":1,"codex-cli":2},hs=state.catalog.harnesses.filter(x=>x.id in order).sort((a,b)=>order[a.id]-order[b.id]);$("#harness-list").replaceChildren(...hs.map(x=>harness(x,h.has(x.id))));let cs=state.catalog.cases.map(x=>choice(x,c.has(x.id)));$("#case-list").replaceChildren(...(cs.length?cs:[el("p","No test cases found. Import one to get started.","empty")]));configs()}
+function launch(){let h=picks().length,c=cases().length,count=h*c,m=$("#model-select"),r=$("#reasoning-select"),b=$("#start-run");$("#attempt-count").textContent=`${count} attempt${count===1?"":"s"}`;b.disabled=!count||m.disabled||r.disabled;$("#launch-summary").textContent=count?`${h} harness${h===1?"":"es"} × ${c} case${c===1?"":"s"} = exactly ${count} attempts at ${m.value} / ${r.value}.`:"Select a harness and a test case to continue."}
+function merge(a){if(!a?.id)return;let old=state.attempts.get(a.id)||{};state.attempts.set(a.id,{...old,...a,harness_id:a.harness_id||a.variant_id||old.harness_id,elapsed_ms:a.elapsed_ms??a.elapsed_millis??old.elapsed_ms,usage:{...old.usage,...a.usage},logs:a.logs||old.logs||[]});attempts();comparisonControls()}
+function stat(node,k,v){$(`[data-stat="${k}"]`,node).textContent=v}
+function card(a){let x=$("#attempt-template").content.firstElementChild.cloneNode(true),u=use(a),r=a.result||{},s=a.status||"queued",name=a.harness_name||a.display_name||a.harness_id||a.variant_id||"Harness",pass=a.verifier_passed??r.verifier_passed,captured=dsh(a)&&s==="completed";$(".status",x).classList.add(s);$(".attempt-title",x).textContent=`${name} · ${a.case_name||a.case_id||"Test case"}`;$(".attempt-subtitle",x).textContent=`${s}${a.id?" · "+a.id:""}`;let badges=$(".attempt-badges",x);badges.append(el("span",dsh(a)?(captured?"DSH trajectory captured":"DSH trajectory enabled"):"Trajectory unavailable",`badge ${dsh(a)?"trajectory-ready":"trajectory-off"}`));if(captured){let pick=document.createElement("label"),i=document.createElement("input");pick.className="compare-pick";i.type="checkbox";i.checked=state.compare.has(a.id);i.onchange=()=>{if(i.checked){if(state.compare.size===2){i.checked=false;return}state.compare.add(a.id)}else state.compare.delete(a.id);comparisonControls()};pick.append(i,document.createTextNode(" Compare"));badges.append(pick)}stat(x,"elapsed",dur(active(s)&&a.started_at?Date.now()-new Date(a.started_at):a.elapsed_ms));stat(x,"input-tokens",n(u.input_tokens));stat(x,"output-tokens",n(u.output_tokens));stat(x,"cached-input-tokens",n(u.cached_input_tokens));stat(x,"reasoning-output-tokens",n(u.reasoning_output_tokens));stat(x,"result",pass===true?"Passed":pass===false?"Failed":s);stat(x,"harness",name);stat(x,"model",r.model||a.model||"—");stat(x,"reasoning-effort",r.reasoning_effort||a.reasoning_effort||"—");stat(x,"token-quality",u.token_quality||"—");stat(x,"exit-code",typeof r.exit_code==="number"?r.exit_code:"—");let d=$(".attempt-details",x),t=$(".details",x);t.onclick=()=>{d.hidden=!d.hidden;t.setAttribute("aria-expanded",String(!d.hidden));t.firstChild.textContent=d.hidden?"Details ":"Hide details "};$(".log",x).textContent=a.logs?.join("\n")||"Raw provider output is not retained. Status, elapsed time, and provider usage appear above.";let err=a.error||a.failure_reason||r.failure_reason;if(err){let f=$(".failure",x);f.hidden=false;f.textContent=err}if(captured){let b=$(".trajectory-button",x);b.hidden=false;b.onclick=()=>trajectory(a)}return x}
+function attempts(){let all=[...state.attempts.values()].sort((a,b)=>new Date(b.started_at||b.finished_at||0)-new Date(a.started_at||a.finished_at||0)),shown=all.filter(a=>state.filter==="all"||(state.filter==="active"?active(a.status):!active(a.status))),host=$("#attempts");host.replaceChildren(...(shown.length?shown.map(card):[el("div",all.length?"No matching attempts":"No attempts yet","empty-state")]));let run=all.filter(a=>active(a.status)),fin=all.filter(a=>!active(a.status)),failed=fin.filter(a=>(a.verifier_passed??a.result?.verifier_passed)===false||["failed","timed_out","infrastructure_invalid","unsupported","interrupted"].includes(a.status)),sum=k=>{let v=all.map(use).map(x=>x[k]).filter(x=>typeof x==="number");return v.length?n(v.reduce((a,b)=>a+b)):"—"},totals=all.map(use).map(x=>typeof x.input_tokens==="number"&&typeof x.output_tokens==="number"?x.input_tokens+x.output_tokens:null).filter(x=>x!==null),elapsed=all.map(a=>active(a.status)&&a.started_at?Date.now()-new Date(a.started_at):a.elapsed_ms).filter(x=>typeof x==="number");$("#metric-running").textContent=run.length;$("#metric-completed").textContent=fin.length;$("#metric-passed").textContent=fin.filter(a=>(a.verifier_passed??a.result?.verifier_passed)===true).length;$("#metric-failed").textContent=failed.length;$("#metric-input-tokens").textContent=sum("input_tokens");$("#metric-output-tokens").textContent=sum("output_tokens");$("#metric-tokens").textContent=totals.length?n(totals.reduce((a,b)=>a+b)):"—";$("#metric-elapsed").textContent=elapsed.length?dur(Math.max(...elapsed)):"—";$("#filter-all").textContent=all.length;$("#filter-active").textContent=run.length;$("#filter-finished").textContent=fin.length}
+async function start(){let b=$("#start-run");b.disabled=true;b.textContent="Starting…";try{let r=await api("/api/runs",{method:"POST",body:JSON.stringify({harness_ids:picks(),case_ids:cases(),model:$("#model-select").value,reasoning_effort:$("#reasoning-select").value})});(r.attempts||[]).forEach(merge)}catch(e){alert(e.message)}finally{b.textContent="Start benchmark ↗";launch()}}
+async function trajectory(a){let d=$("#trajectory-dialog");d.showModal();$("#trajectory-title").textContent=`${a.harness_name||a.display_name||a.harness_id||a.variant_id||"DeepSeek Harness"} playback`;try{let data=await api(`/api/attempts/${encodeURIComponent(a.id)}/trajectory`),events=Array.isArray(data)?data:(data.events||data.trajectory||[]);state.playback={events,visible:events.map((_,i)=>i),index:0,timer:null};let f=$("#trajectory-filter");f.replaceChildren(el("option","All event types"));f.firstChild.value="";[...new Set(events.map(e=>e.type||e.category||"event"))].forEach(v=>{let o=el("option",v);o.value=v;f.append(o)});$("#trajectory-summary").textContent=`${events.length} recorded events · ${dur(data.duration_ms??a.elapsed_ms)} elapsed`;paint()}catch(e){state.playback={events:[],visible:[],index:0,timer:null};$("#trajectory-summary").textContent=`Trajectory unavailable: ${e.message}`;paint()}}
+function paint(){let p=state.playback,e=p?.events[p.visible[p.index]];if(!p)return;let q=$("#trajectory-scrubber");q.max=Math.max(0,p.visible.length-1);q.value=p.index;$("#trajectory-position").textContent=p.visible.length?`${p.index+1} / ${p.visible.length}`:"0 / 0";$("#trajectory-events").replaceChildren(...p.visible.map((id,i)=>{let x=el("li",`${i+1}. ${p.events[id].label||p.events[id].type||p.events[id].category||"event"}`,i===p.index?"current":"");x.onclick=()=>{p.index=i;paint()};return x}));let when=e?.relative_ms??e?.elapsed_ms;$("#trajectory-event-meta").replaceChildren(el("div",e?`${e.type||e.category||"event"} · ${typeof when==="number"?dur(when):e.timestamp||"—"}`:"No matching events"));$("#trajectory-payload").textContent=e?JSON.stringify(e.payload??e.data??e,null,2):"No events match this filter."}
+function move(n){let p=state.playback;if(p?.visible.length){p.index=Math.max(0,Math.min(p.visible.length-1,p.index+n));paint()}}
+function playback(){let d=$("#trajectory-dialog"),play=$("#trajectory-play");$("[data-close-trajectory]",d).onclick=()=>d.close();d.onclose=()=>{if(state.playback?.timer)clearInterval(state.playback.timer);state.playback=null;play.textContent="Play"};$("#trajectory-prev").onclick=()=>move(-1);$("#trajectory-next").onclick=()=>move(1);$("#trajectory-scrubber").oninput=e=>{if(state.playback){state.playback.index=+e.target.value;paint()}};$("#trajectory-filter").onchange=e=>{let p=state.playback;if(!p)return;p.visible=p.events.map((v,i)=>({v,i})).filter(x=>!e.target.value||(x.v.type||x.v.category||"event")===e.target.value).map(x=>x.i);p.index=0;paint()};play.onclick=e=>{let p=state.playback;if(!p?.visible.length)return;if(p.timer){clearInterval(p.timer);p.timer=null;e.target.textContent="Play"}else{e.target.textContent="Pause";p.timer=setInterval(()=>{if(p.index>=p.visible.length-1){e.target.click()}else move(1)},+$("#trajectory-speed").value)}}}
+function comparisonControls(){let ok=[...state.attempts.values()].filter(a=>dsh(a)&&a.status==="completed");for(let id of [...state.compare])if(!ok.some(a=>a.id===id))state.compare.delete(id);$("#compare-trajectories").disabled=state.compare.size!==2;$("#comparison-help").textContent=ok.length?"Select two completed DeepSeek Harness attempts for the same test case.":"No completed DeepSeek Harness trajectories are available yet."}
+async function compare(){let [l,r]=[...state.compare],a=state.attempts.get(l),b=state.attempts.get(r);if(a?.case_id!==b?.case_id){$("#comparison-result").replaceChildren(el("p","Choose attempts for the same test case.","form-error"));return}try{let x=await api(`${COMPARE}?left=${encodeURIComponent(l)}&right=${encodeURIComponent(r)}`),rows=x.rows||x.events||[],table=document.createElement("table"),head=document.createElement("tr"),leftName=a.display_name||a.variant_id||"Left",rightName=b.display_name||b.variant_id||"Right";["Step",leftName,rightName,"Match"].forEach(v=>head.append(el("th",v)));table.append(head,...rows.map((v,i)=>{let tr=document.createElement("tr"),same=v.same??v.match??false;[i+1,v.left?.label||v.left?.type||v.left||"—",v.right?.label||v.right?.type||v.right||"—",same?"Same":"Changed"].forEach(v=>tr.append(el("td",String(v),same?"same":"changed")));return tr}));$("#comparison-result").replaceChildren(el("p",`${leftName}: ${x.left?.event_count??0} events / ${dur(x.left?.duration_ms)} · ${rightName}: ${x.right?.event_count??0} events / ${dur(x.right?.duration_ms)}. ${rows.length} aligned rows.`,"comparison-summary"),table)}catch(e){$("#comparison-result").replaceChildren(el("p",e.message,"form-error"))}}
+async function load(){try{let [c,r]=await Promise.all([api("/api/catalog"),api("/api/runs")]);state.catalog=c;(Array.isArray(r)?r:[r]).flatMap(x=>x?.attempts||[]).forEach(merge);catalog();attempts();$("#connection").className="connection online";$("#connection span").textContent="Live"}catch(e){$("#connection").className="connection offline"}}
+function stream(){if(!window.EventSource)return;let s=new EventSource("/api/events"),connection=$("#connection");s.onopen=()=>{connection.className="connection online";$("span",connection).textContent="Live"};s.onerror=()=>{connection.className="connection offline";$("span",connection).textContent="Reconnecting"};["attempt","progress"].forEach(t=>s.addEventListener(t,e=>{try{merge(JSON.parse(e.data).attempt)}catch(_){}}));s.addEventListener("log",e=>{try{let x=JSON.parse(e.data),a=state.attempts.get(x.attempt_id);if(a){a.logs=[...(a.logs||[]),x.line];attempts()}}catch(_){}})}
+function imports(){let d=$("#import-dialog"),f=$("#import-form");$("#show-import").onclick=()=>d.showModal();$$('[data-close-dialog]',d).forEach(b=>b.onclick=()=>d.close());$$('input[name="source_type"]',f).forEach(i=>i.onchange=()=>["archive","files","repo"].forEach(x=>$(`#${x}-field`,f).hidden=i.value!==(x==="repo"?"repo_url":x)));f.onsubmit=async e=>{e.preventDefault();let data=new FormData(f),error=$("#import-error",f);data.set("id",data.get("name"));try{let out=await api("/api/cases",{method:"POST",body:data}),item=out.case||out;state.catalog.cases.push({...item,name:item.name||item.id,prompt_preview:item.prompt_preview||item.prompt});catalog();d.close();f.reset()}catch(x){error.textContent=x.message}}}
+$("#start-run").onclick=start;$("#refresh").onclick=load;$("#model-select").onchange=configs;$("#reasoning-select").onchange=launch;$$('.filter').forEach(b=>b.onclick=()=>{state.filter=b.dataset.filter;$$('.filter').forEach(x=>x.classList.toggle("active",x===b));attempts()});$("#compare-trajectories").onclick=compare;imports();playback();load();stream();setInterval(()=>{if([...state.attempts.values()].some(a=>active(a.status)))attempts()},1000);
 })();

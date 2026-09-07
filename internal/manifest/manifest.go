@@ -17,6 +17,26 @@ const (
 	NetworkPolicy = "unrestricted-egress-v1"
 )
 
+// SupportedModels is the complete model/reasoning contract exposed by the UI.
+// Keep this here so manifests, APIs, and runners validate the same matrix.
+var SupportedModels = map[string][]string{
+	"gpt-6-astra":   {"low", "medium", "high", "xhigh", "max", "ultra"},
+	"gpt-5.6-sol":   {"low", "medium", "high", "xhigh", "max", "ultra"},
+	"gpt-5.6-terra": {"low", "medium", "high", "xhigh", "max", "ultra"},
+	"gpt-5.6-luna":  {"low", "medium", "high", "xhigh", "max"},
+	"gpt-5.5":       {"low", "medium", "high", "xhigh"},
+	"gpt-5.4-mini":  {"low", "medium", "high", "xhigh"},
+}
+
+func ValidModelReasoning(model, reasoning string) bool {
+	for _, allowed := range SupportedModels[model] {
+		if reasoning == allowed {
+			return true
+		}
+	}
+	return false
+}
+
 type Variant struct {
 	ID              string   `json:"id"`
 	Image           string   `json:"image"`
@@ -34,11 +54,11 @@ func (v Variant) Validate() error {
 			return fmt.Errorf("manifest %s is required", n)
 		}
 	}
-	if v.ID != "codex-cli" && v.ID != "dsh-default-codex" {
+	if v.ID != "codex-cli" && v.ID != "dsh-default-codex" && v.ID != "dsh-modified-codex" {
 		return fmt.Errorf("unsupported variant id %q", v.ID)
 	}
-	if v.Model != Model || v.ReasoningEffort != Reasoning {
-		return fmt.Errorf("model and reasoning must be pinned to %s/%s", Model, Reasoning)
+	if !ValidModelReasoning(v.Model, v.ReasoningEffort) {
+		return fmt.Errorf("unsupported model/reasoning pair %s/%s", v.Model, v.ReasoningEffort)
 	}
 	if v.NetworkPolicyID != NetworkPolicy {
 		return fmt.Errorf("unexpected network policy %q", v.NetworkPolicyID)

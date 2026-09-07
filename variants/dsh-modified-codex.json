@@ -1,6 +1,6 @@
 {
-  "id": "dsh-default-codex",
-  "display_name": "DeepSeek Harness default with Codex plugin",
+  "id": "dsh-modified-codex",
+  "display_name": "DeepSeek Harness modified with Codex plugin",
   "image": "agent-harness-benchmark:latest",
   "adapter": "/opt/bench/dsh-adapter.sh",
   "model": "gpt-5.6-luna",

@@ -1,0 +1,22 @@
+# Modified composition enables the built-in Codex subagent surface. The exact
+# module is supplied by the pinned DSH distribution at image build time.
+- id: session-persistence-jsonl
+  config:
+    root: /home/bench/.dsh/sessions
+    compression: none
+    packChunks: false
+- insert:
+    - id: subagent-codex
+      name: '@deepseek-ai/dsh-subagent-codex'
+      config:
+        providerName: codex
+        model: !!js process.env.BENCH_MODEL
+    - id: tool-subagent-codex
+      name: '@deepseek-ai/dsh-tool-subagent'
+      config:
+        provider: codex
+        toolName: subagent_codex
+        backgroundMode: one-shot
+        maxDepth: provider-managed
+- id: session-telemetry-otel
+  disabled: true

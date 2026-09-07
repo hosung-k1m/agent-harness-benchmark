@@ -32,3 +32,10 @@ func TestWritePlanPersistsSeedOrderAndAttempts(t *testing.T) {
 		t.Fatalf("persisted plan mismatch: %#v", got)
 	}
 }
+
+func TestComparisonVariantIDs(t *testing.T) {
+	want := []string{"codex-cli", "dsh-default-codex", "dsh-modified-codex"}
+	if got := comparisonVariantIDs(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("comparison variants = %#v, want %#v", got, want)
+	}
+}

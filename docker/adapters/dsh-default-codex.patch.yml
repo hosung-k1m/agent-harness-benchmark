@@ -1,0 +1,15 @@
+# Codex subagent provider is registered and authenticated but intentionally
+# dormant in the default composition. The parent remains openai-codex.
+- insert:
+    - id: subagent-codex
+      name: '@deepseek-ai/dsh-subagent-codex'
+      config:
+        providerName: codex
+        model: !!js process.env.BENCH_MODEL
+- id: session-persistence-jsonl
+  config:
+    root: /home/bench/.dsh/sessions
+    compression: none
+    packChunks: false
+- id: session-telemetry-otel
+  disabled: true

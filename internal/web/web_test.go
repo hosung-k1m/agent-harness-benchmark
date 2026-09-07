@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -23,6 +24,146 @@ import (
 func fakeVariant(id string) run.Variant {
 	return run.Variant{Variant: manifest.Variant{ID: id, Image: "test", ImageDigest: "sha256:test", Adapter: "/opt/bench/test", Model: manifest.Model, ReasoningEffort: manifest.Reasoning, NetworkPolicyID: manifest.NetworkPolicy}}
 }
+
+func TestBatchConfigurationIsValidatedAndSnapshotted(t *testing.T) {
+	got := make(chan run.Variant, 1)
+	s, h, _ := newTestServer(t, func(_ context.Context, v run.Variant, _ run.Request) run.Outcome {
+		got <- v
+		return run.Outcome{Dir: "artifact", Result: model.Result{Status: model.StatusCompleted, Usage: model.Usage{TokenQuality: model.TokenUnavailable}}}
+	})
+	bad := httptest.NewRecorder()
+	h.ServeHTTP(bad, httptest.NewRequest(http.MethodPost, "/api/runs", strings.NewReader(`{"harness_ids":["codex-cli"],"case_ids":["one"],"model":"nope","reasoning_effort":"high"}`)))
+	if bad.Code != http.StatusBadRequest {
+		t.Fatalf("invalid config: %d %s", bad.Code, bad.Body.String())
+	}
+	good := httptest.NewRecorder()
+	h.ServeHTTP(good, httptest.NewRequest(http.MethodPost, "/api/runs", strings.NewReader(`{"harness_ids":["dsh-default-codex"],"case_ids":["one"],"model":"gpt-5.6-terra","reasoning_effort":"medium"}`)))
+	if good.Code != http.StatusCreated {
+		t.Fatalf("valid config: %d %s", good.Code, good.Body.String())
+	}
+	var batch Batch
+	_ = json.NewDecoder(good.Body).Decode(&batch)
+	if batch.Attempts[0].Model != "gpt-5.6-terra" || batch.Attempts[0].ReasoningEffort != "medium" || !batch.Attempts[0].TrajectoryAvailable || batch.Attempts[0].HarnessKind != "deepseek-harness" {
+		t.Fatalf("snapshot = %#v", batch.Attempts[0])
+	}
+	select {
+	case v := <-got:
+		if v.Model != "gpt-5.6-terra" || v.ReasoningEffort != "medium" {
+			t.Fatalf("execution variant = %#v", v)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("executor not called")
+	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		s.mu.RLock()
+		done := s.batches[batch.ID].Status == "completed"
+		s.mu.RUnlock()
+		if done {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	reloaded, err := New(s.cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	persisted := reloaded.batches[batch.ID].Attempts[0]
+	if persisted.Model != "gpt-5.6-terra" || persisted.ReasoningEffort != "medium" || persisted.DisplayName == "" || !persisted.TrajectoryAvailable {
+		t.Fatalf("persisted snapshot = %#v", persisted)
+	}
+}
+
+func TestCatalogExposesThreeHarnessChoicesAndMatrix(t *testing.T) {
+	root := t.TempDir()
+	old, _ := os.Getwd()
+	defer os.Chdir(old)
+	if err := os.Chdir(root); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir("variants", 0700); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"codex-cli", "dsh-default-codex", "dsh-modified-codex"} {
+		if err := os.WriteFile(filepath.Join("variants", id+".json"), []byte("{}"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, h, _ := newTestServer(t, func(context.Context, run.Variant, run.Request) run.Outcome { return run.Outcome{} })
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/catalog", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("catalog: %d %s", w.Code, w.Body.String())
+	}
+	var out struct {
+		Harnesses []Harness `json:"harnesses"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Harnesses) != 3 {
+		t.Fatalf("harnesses = %#v", out.Harnesses)
+	}
+	for _, item := range out.Harnesses {
+		if len(item.SupportedModels) == 0 {
+			t.Fatalf("missing matrix: %#v", item)
+		}
+	}
+}
+
+func TestTrajectoryAndComparisonSafety(t *testing.T) {
+	s, h, _ := newTestServer(t, func(context.Context, run.Variant, run.Request) run.Outcome { return run.Outcome{} })
+	makeAttempt := func(id, caseID string, event string) *Attempt {
+		dir := filepath.Join(t.TempDir(), "attempt")
+		if err := os.MkdirAll(filepath.Join(dir, "out"), 0700); err != nil {
+			t.Fatal(err)
+		}
+		data := `{"schema_version":"1","source":"dsh","duration_ms":12,"events":[` + event + `]}`
+		if err := os.WriteFile(filepath.Join(dir, "out", "trajectory.json"), []byte(data), 0600); err != nil {
+			t.Fatal(err)
+		}
+		return &Attempt{ID: id, BatchID: "b", CaseID: caseID, VariantID: "dsh-default-codex", HarnessKind: "deepseek-harness", TrajectoryAvailable: true, Status: "completed", Artifact: dir, Result: &model.Result{Status: model.StatusCompleted}}
+	}
+	left, right := makeAttempt("aaaa", "one", `{"type":"tool"}`), makeAttempt("bbbb", "one", `{"type":"answer"}`)
+	s.mu.Lock()
+	s.batches["b"] = &Batch{ID: "b", Attempts: []*Attempt{left, right}}
+	s.mu.Unlock()
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/attempts/aaaa/trajectory", nil))
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"event_count":1`) {
+		t.Fatalf("trajectory: %d %s", w.Code, w.Body.String())
+	}
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/api/trajectories/compare", strings.NewReader(`{"attempt_ids":["aaaa","bbbb"]}`)))
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"same":false`) {
+		t.Fatalf("comparison: %d %s", w.Code, w.Body.String())
+	}
+	// A symlinked trajectory that escapes the owned out directory must never be exposed.
+	escape := filepath.Join(t.TempDir(), "secret.json")
+	_ = os.WriteFile(escape, []byte(`{"schema_version":"1","source":"dsh","events":[]}`), 0600)
+	_ = os.Remove(filepath.Join(left.Artifact, "out", "trajectory.json"))
+	if err := os.Symlink(escape, filepath.Join(left.Artifact, "out", "trajectory.json")); err != nil {
+		t.Fatal(err)
+	}
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/attempts/aaaa/trajectory", nil))
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("escaped file: %d %s", w.Code, w.Body.String())
+	}
+}
+
+func TestTrajectoryComparisonIgnoresVolatileEventMetadata(t *testing.T) {
+	left := json.RawMessage(`{"sequence":1,"relative_ms":10,"timestamp":"2026-01-01T00:00:00Z","type":"tool","category":"tool","label":"search","detail":"docs","usage_delta":{"input_tokens":3}}`)
+	timeShifted := json.RawMessage(`{"index":44,"sequence":9,"relative_ms":999,"time":"later","type":"tool","category":"tool","label":"search","detail":"docs","usage_delta":{"input_tokens":3}}`)
+	if !semanticEventEqual(left, timeShifted) {
+		t.Fatal("time and sequence-only changes must compare as the same event")
+	}
+	semanticChange := json.RawMessage(`{"sequence":2,"relative_ms":11,"type":"tool","category":"tool","label":"search","detail":"different docs","usage_delta":{"input_tokens":3}}`)
+	if semanticEventEqual(left, semanticChange) {
+		t.Fatal("semantic detail changes must compare as changed")
+	}
+}
+
 func newTestServer(t *testing.T, execute func(context.Context, run.Variant, run.Request) run.Outcome) (*Server, http.Handler, string) {
 	t.Helper()
 	root := t.TempDir()

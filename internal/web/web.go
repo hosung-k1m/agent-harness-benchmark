@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/hosungkim/agent-harness-benchmark/internal/artifact"
+	"github.com/hosungkim/agent-harness-benchmark/internal/manifest"
 	"github.com/hosungkim/agent-harness-benchmark/internal/model"
 	"github.com/hosungkim/agent-harness-benchmark/internal/run"
 )
@@ -39,23 +40,39 @@ type Case struct {
 	HasFixture bool   `json:"has_fixture"`
 }
 type Harness struct {
-	ID              string `json:"id"`
-	DisplayName     string `json:"display_name"`
-	Model           string `json:"model"`
-	ReasoningEffort string `json:"reasoning_effort"`
+	ID                  string        `json:"id"`
+	DisplayName         string        `json:"display_name"`
+	Kind                string        `json:"kind"`
+	TrajectoryAvailable bool          `json:"trajectory_available"`
+	SupportedModels     []ModelOption `json:"supported_models"`
+	Model               string        `json:"model"`
+	ReasoningEffort     string        `json:"reasoning_effort"`
+	PluginMode          string        `json:"plugin_mode,omitempty"`
+	PluginRevision      string        `json:"plugin_revision,omitempty"`
+}
+type ModelOption struct {
+	ID               string   `json:"id"`
+	ReasoningEfforts []string `json:"reasoning_efforts"`
 }
 type Attempt struct {
-	ID            string        `json:"id"`
-	BatchID       string        `json:"batch_id"`
-	CaseID        string        `json:"case_id"`
-	VariantID     string        `json:"variant_id"`
-	Status        string        `json:"status"`
-	StartedAt     *time.Time    `json:"started_at,omitempty"`
-	FinishedAt    *time.Time    `json:"finished_at,omitempty"`
-	ElapsedMillis int64         `json:"elapsed_millis"`
-	Result        *model.Result `json:"result,omitempty"`
-	Artifact      string        `json:"artifact,omitempty"`
-	Error         string        `json:"error,omitempty"`
+	ID                  string        `json:"id"`
+	BatchID             string        `json:"batch_id"`
+	CaseID              string        `json:"case_id"`
+	VariantID           string        `json:"variant_id"`
+	DisplayName         string        `json:"display_name,omitempty"`
+	HarnessKind         string        `json:"harness_kind,omitempty"`
+	TrajectoryAvailable bool          `json:"trajectory_available"`
+	Model               string        `json:"model,omitempty"`
+	ReasoningEffort     string        `json:"reasoning_effort,omitempty"`
+	PluginMode          string        `json:"plugin_mode,omitempty"`
+	PluginRevision      string        `json:"plugin_revision,omitempty"`
+	Status              string        `json:"status"`
+	StartedAt           *time.Time    `json:"started_at,omitempty"`
+	FinishedAt          *time.Time    `json:"finished_at,omitempty"`
+	ElapsedMillis       int64         `json:"elapsed_millis"`
+	Result              *model.Result `json:"result,omitempty"`
+	Artifact            string        `json:"artifact,omitempty"`
+	Error               string        `json:"error,omitempty"`
 }
 type Batch struct {
 	ID        string     `json:"id"`
@@ -117,6 +134,11 @@ func (s *Server) Handler(staticDir string) http.Handler {
 	mux.HandleFunc("GET /api/batches", s.listBatches)
 	mux.HandleFunc("POST /api/batches", s.createBatch)
 	mux.HandleFunc("GET /api/batches/", s.getBatch)
+	mux.HandleFunc("GET /api/attempts/", s.getAttemptArtifact)
+	mux.HandleFunc("GET /api/trajectories/compare", s.compareTrajectories)
+	mux.HandleFunc("POST /api/trajectories/compare", s.compareTrajectories)
+	// Kept as a readable dashboard alias for the comparison view.
+	mux.HandleFunc("GET /api/trajectory-comparison", s.compareTrajectories)
 	mux.HandleFunc("GET /api/events", s.events)
 	if staticDir != "" {
 		if info, err := os.Stat(staticDir); err == nil && info.IsDir() {
@@ -175,7 +197,7 @@ func (s *Server) harnesses(w http.ResponseWriter, _ *http.Request) {
 		if err != nil {
 			continue
 		}
-		out = append(out, Harness{v.ID, v.DisplayName, v.Model, v.ReasoningEffort})
+		out = append(out, describeVariant(v))
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	jsonOut(w, 200, out)
@@ -198,7 +220,10 @@ func (s *Server) catalog(w http.ResponseWriter, _ *http.Request) {
 			h = append(h, map[string]any{"id": id, "name": id, "available": false})
 			continue
 		}
-		h = append(h, map[string]any{"id": v.ID, "name": v.DisplayName, "description": v.Model + " / " + v.ReasoningEffort, "available": true})
+		d := describeVariant(v)
+		h = append(h, map[string]any{"id": d.ID, "name": d.DisplayName, "description": d.Model + " / " + d.ReasoningEffort, "available": true,
+			"kind": d.Kind, "trajectory_available": d.TrajectoryAvailable, "supported_models": d.SupportedModels,
+			"model": d.Model, "reasoning_effort": d.ReasoningEffort, "plugin_mode": d.PluginMode, "plugin_revision": d.PluginRevision})
 	}
 	c, err := s.caseList()
 	if err != nil {
@@ -214,6 +239,36 @@ func (s *Server) catalog(w http.ResponseWriter, _ *http.Request) {
 		cs = append(cs, map[string]any{"id": x.ID, "name": x.ID, "prompt_preview": preview, "source_type": "files"})
 	}
 	jsonOut(w, 200, map[string]any{"harnesses": h, "cases": cs})
+}
+
+func describeVariant(v run.Variant) Harness {
+	h := Harness{ID: v.ID, DisplayName: v.DisplayName, Model: v.Model, ReasoningEffort: v.ReasoningEffort}
+	if h.DisplayName == "" {
+		h.DisplayName = v.ID
+	}
+	for _, id := range sortedModelIDs() {
+		h.SupportedModels = append(h.SupportedModels, ModelOption{ID: id, ReasoningEfforts: append([]string(nil), manifest.SupportedModels[id]...)})
+	}
+	switch v.ID {
+	case "dsh-default-codex":
+		h.Kind, h.TrajectoryAvailable, h.PluginMode = "deepseek-harness", true, "codex"
+		h.PluginRevision = "default"
+	case "dsh-modified-codex":
+		h.Kind, h.TrajectoryAvailable, h.PluginMode = "deepseek-harness", true, "codex"
+		h.PluginRevision = "modified"
+	default:
+		h.Kind = "codex-cli"
+	}
+	return h
+}
+
+func sortedModelIDs() []string {
+	ids := make([]string, 0, len(manifest.SupportedModels))
+	for id := range manifest.SupportedModels {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
 }
 func safeID(id string) bool {
 	if id == "" || len(id) > 80 {
@@ -259,10 +314,12 @@ func (s *Server) cases(w http.ResponseWriter, _ *http.Request) {
 }
 
 type batchRequest struct {
-	VariantIDs []string `json:"variant_ids"`
-	HarnessIDs []string `json:"harness_ids"`
-	CaseIDs    []string `json:"case_ids"`
-	Workers    int      `json:"workers"`
+	VariantIDs      []string `json:"variant_ids"`
+	HarnessIDs      []string `json:"harness_ids"`
+	CaseIDs         []string `json:"case_ids"`
+	Workers         int      `json:"workers"`
+	Model           string   `json:"model"`
+	ReasoningEffort string   `json:"reasoning_effort"`
 }
 
 func (s *Server) createBatch(w http.ResponseWriter, r *http.Request) {
@@ -302,6 +359,18 @@ func (s *Server) createBatch(w http.ResponseWriter, r *http.Request) {
 			apiError(w, 400, fmt.Errorf("harness %q: %w", id, err))
 			return
 		}
+		// Variants are immutable on disk. The selected settings apply only to this
+		// batch's private execution copy and are validated by the same contract as manifests.
+		if req.Model != "" {
+			v.Model = req.Model
+		}
+		if req.ReasoningEffort != "" {
+			v.ReasoningEffort = req.ReasoningEffort
+		}
+		if err := v.Validate(); err != nil {
+			apiError(w, 400, fmt.Errorf("harness %q configuration: %w", id, err))
+			return
+		}
 		variants[id] = v
 	}
 	cases := map[string]Case{}
@@ -322,7 +391,9 @@ func (s *Server) createBatch(w http.ResponseWriter, r *http.Request) {
 	b := &Batch{ID: newID(), CreatedAt: time.Now().UTC(), Status: "queued"}
 	for _, cid := range req.CaseIDs {
 		for _, vid := range req.VariantIDs {
-			b.Attempts = append(b.Attempts, &Attempt{ID: newID(), BatchID: b.ID, CaseID: cid, VariantID: vid, Status: "queued"})
+			v := variants[vid]
+			d := describeVariant(v)
+			b.Attempts = append(b.Attempts, &Attempt{ID: newID(), BatchID: b.ID, CaseID: cid, VariantID: vid, DisplayName: d.DisplayName, HarnessKind: d.Kind, TrajectoryAvailable: d.TrajectoryAvailable, Model: v.Model, ReasoningEffort: v.ReasoningEffort, PluginMode: d.PluginMode, PluginRevision: d.PluginRevision, Status: "queued"})
 		}
 	}
 	s.mu.Lock()
@@ -492,6 +563,234 @@ func (s *Server) logs(w http.ResponseWriter, _ *http.Request, id string) {
 		return
 	}
 	jsonOut(w, 200, map[string]any{"lines": lines})
+}
+
+// GET /api/attempts/{attempt_id}/trajectory returns the captured, sanitized
+// adapter trajectory. It intentionally never serves the broader attempt directory.
+func (s *Server) getAttemptArtifact(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimPrefix(r.URL.Path, "/api/attempts/")
+	if !strings.HasSuffix(path, "/trajectory") {
+		apiError(w, http.StatusNotFound, errors.New("not found"))
+		return
+	}
+	id := strings.TrimSuffix(path, "/trajectory")
+	if !safeID(id) || strings.Contains(id, "/") {
+		apiError(w, http.StatusNotFound, errors.New("attempt not found"))
+		return
+	}
+	a := s.findAttempt(id)
+	if a == nil {
+		apiError(w, http.StatusNotFound, errors.New("attempt not found"))
+		return
+	}
+	t, err := readAttemptTrajectory(a)
+	if err != nil {
+		trajectoryError(w, err)
+		return
+	}
+	jsonOut(w, http.StatusOK, t)
+}
+
+type trajectory struct {
+	SchemaVersion string            `json:"schema_version"`
+	Source        string            `json:"source"`
+	EventCount    int               `json:"event_count"`
+	DurationMS    int64             `json:"duration_ms"`
+	Events        []json.RawMessage `json:"events"`
+	Summary       json.RawMessage   `json:"summary,omitempty"`
+}
+
+func (s *Server) findAttempt(id string) *Attempt {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, b := range s.batches {
+		for _, a := range b.Attempts {
+			if a.ID == id {
+				return copyAttempt(a)
+			}
+		}
+	}
+	return nil
+}
+
+func isDSH(a *Attempt) bool {
+	return a.HarnessKind == "deepseek-harness" || strings.HasPrefix(a.VariantID, "dsh-")
+}
+
+func readAttemptTrajectory(a *Attempt) (trajectory, error) {
+	if a.Status != string(model.StatusCompleted) || !isDSH(a) || !a.TrajectoryAvailable && a.HarnessKind != "" {
+		return trajectory{}, errTrajectoryUnavailable
+	}
+	if a.Artifact == "" {
+		return trajectory{}, os.ErrNotExist
+	}
+	base, err := filepath.Abs(filepath.Clean(a.Artifact))
+	if err != nil {
+		return trajectory{}, err
+	}
+	base, err = filepath.EvalSymlinks(base)
+	if err != nil {
+		return trajectory{}, os.ErrNotExist
+	}
+	out, err := filepath.EvalSymlinks(filepath.Join(base, "out"))
+	if err != nil || !pathInside(base, out) {
+		return trajectory{}, os.ErrNotExist
+	}
+	target, err := filepath.EvalSymlinks(filepath.Join(out, "trajectory.json"))
+	if err != nil || !pathInside(out, target) {
+		return trajectory{}, os.ErrNotExist
+	}
+	info, err := os.Stat(target)
+	if err != nil || !info.Mode().IsRegular() || info.Size() > 16<<20 {
+		return trajectory{}, os.ErrNotExist
+	}
+	b, err := os.ReadFile(target)
+	if err != nil {
+		return trajectory{}, err
+	}
+	var t trajectory
+	if err := json.Unmarshal(b, &t); err != nil || t.SchemaVersion == "" || t.Source == "" {
+		return trajectory{}, errors.New("invalid trajectory artifact")
+	}
+	var legacy struct {
+		Summary struct {
+			EventCount    int64 `json:"event_count"`
+			ElapsedMillis int64 `json:"elapsed_millis"`
+		} `json:"summary"`
+	}
+	_ = json.Unmarshal(b, &legacy)
+	if t.EventCount != 0 && t.EventCount != len(t.Events) {
+		return trajectory{}, errors.New("invalid trajectory event count")
+	}
+	if legacy.Summary.EventCount != 0 && legacy.Summary.EventCount != int64(len(t.Events)) {
+		return trajectory{}, errors.New("invalid trajectory event count")
+	}
+	t.EventCount = len(t.Events)
+	if t.DurationMS == 0 {
+		t.DurationMS = legacy.Summary.ElapsedMillis
+	}
+	return t, nil
+}
+
+func pathInside(base, target string) bool {
+	rel, err := filepath.Rel(base, target)
+	return err == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+var errTrajectoryUnavailable = errors.New("trajectory is unavailable for this attempt")
+
+func trajectoryError(w http.ResponseWriter, err error) {
+	if errors.Is(err, os.ErrNotExist) {
+		apiError(w, http.StatusNotFound, errors.New("trajectory not found"))
+		return
+	}
+	if errors.Is(err, errTrajectoryUnavailable) {
+		apiError(w, http.StatusConflict, err)
+		return
+	}
+	apiError(w, http.StatusBadRequest, err)
+}
+
+// POST /api/trajectories/compare accepts {"attempt_ids":["left","right"]}.
+// GET accepts ?left_attempt_id=...&right_attempt_id=.... Both return left/right
+// attempt summaries plus deterministic, index-aligned comparison rows.
+func (s *Server) compareTrajectories(w http.ResponseWriter, r *http.Request) {
+	var ids []string
+	if r.Method == http.MethodGet {
+		left, right := r.URL.Query().Get("left_attempt_id"), r.URL.Query().Get("right_attempt_id")
+		if left == "" {
+			left = r.URL.Query().Get("left")
+		}
+		if right == "" {
+			right = r.URL.Query().Get("right")
+		}
+		ids = []string{left, right}
+	} else {
+		var req struct {
+			AttemptIDs []string `json:"attempt_ids"`
+		}
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+			apiError(w, http.StatusBadRequest, err)
+			return
+		}
+		ids = req.AttemptIDs
+	}
+	if len(ids) != 2 || ids[0] == "" || ids[1] == "" || ids[0] == ids[1] || !safeID(ids[0]) || !safeID(ids[1]) {
+		apiError(w, http.StatusBadRequest, errors.New("provide exactly two distinct attempt_ids"))
+		return
+	}
+	left, right := s.findAttempt(ids[0]), s.findAttempt(ids[1])
+	if left == nil || right == nil {
+		apiError(w, http.StatusNotFound, errors.New("attempt not found"))
+		return
+	}
+	if left.CaseID != right.CaseID {
+		apiError(w, http.StatusBadRequest, errors.New("trajectories must be from the same case"))
+		return
+	}
+	lt, err := readAttemptTrajectory(left)
+	if err != nil {
+		trajectoryError(w, err)
+		return
+	}
+	rt, err := readAttemptTrajectory(right)
+	if err != nil {
+		trajectoryError(w, err)
+		return
+	}
+	rows := make([]map[string]any, 0, max(len(lt.Events), len(rt.Events)))
+	for i := 0; i < max(len(lt.Events), len(rt.Events)); i++ {
+		row := map[string]any{"index": i, "same": i < len(lt.Events) && i < len(rt.Events) && semanticEventEqual(lt.Events[i], rt.Events[i])}
+		if i < len(lt.Events) {
+			row["left"] = json.RawMessage(lt.Events[i])
+			row["left_type"] = trajectoryEventType(lt.Events[i])
+		}
+		if i < len(rt.Events) {
+			row["right"] = json.RawMessage(rt.Events[i])
+			row["right_type"] = trajectoryEventType(rt.Events[i])
+		}
+		rows = append(rows, row)
+	}
+	jsonOut(w, http.StatusOK, map[string]any{"left": trajectorySummary(left, lt), "right": trajectorySummary(right, rt), "rows": rows})
+}
+
+// semanticEventEqual deliberately ignores adapter bookkeeping that is expected
+// to differ between otherwise equivalent trajectories. Payload fields remain
+// intact, including usage_delta, so comparison remains meaningful.
+func semanticEventEqual(left, right json.RawMessage) bool {
+	l, r := semanticEventJSON(left), semanticEventJSON(right)
+	return l != nil && r != nil && string(l) == string(r)
+}
+
+func semanticEventJSON(raw json.RawMessage) []byte {
+	var event map[string]json.RawMessage
+	if json.Unmarshal(raw, &event) != nil {
+		return nil
+	}
+	for _, key := range []string{"index", "sequence", "relative_ms", "timestamp", "time"} {
+		delete(event, key)
+	}
+	canonical, err := json.Marshal(event)
+	if err != nil {
+		return nil
+	}
+	return canonical
+}
+func trajectoryEventType(raw json.RawMessage) string {
+	var v struct {
+		Type string `json:"type"`
+	}
+	_ = json.Unmarshal(raw, &v)
+	return v.Type
+}
+func trajectorySummary(a *Attempt, t trajectory) map[string]any {
+	return map[string]any{"attempt_id": a.ID, "case_id": a.CaseID, "status": a.Status, "duration_ms": t.DurationMS, "elapsed_millis": a.ElapsedMillis, "usage": resultUsage(a), "event_count": t.EventCount}
+}
+func resultUsage(a *Attempt) any {
+	if a.Result == nil {
+		return nil
+	}
+	return a.Result.Usage
 }
 func cloneBatch(b *Batch) *Batch {
 	c := *b

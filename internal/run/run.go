@@ -157,7 +157,11 @@ func (r Runner) Run(ctx context.Context, v Variant, req Request) (out Outcome) {
 	}
 	actx, cancel := context.WithTimeout(ctx, time.Duration(v.Limits.WallSeconds+10)*time.Second)
 	defer cancel()
-	_, err = dockerx.Exec(actx, r.Engine, name, v.Adapter, "/workspace", "/tmp/prompt.txt", "/home/bench", fmt.Sprint(v.Limits.WallSeconds), "/tmp/out/result.json", "/tmp/out/final.md")
+	adapterArgs := []string{v.Adapter, "/workspace", "/tmp/prompt.txt", "/home/bench", fmt.Sprint(v.Limits.WallSeconds), "/tmp/out/result.json", "/tmp/out/final.md", v.Model, v.ReasoningEffort}
+	if v.ID == "dsh-modified-codex" {
+		adapterArgs = append(adapterArgs, "dsh-modified-codex")
+	}
+	_, err = dockerx.Exec(actx, r.Engine, name, adapterArgs...)
 	if actx.Err() == context.DeadlineExceeded || errors.Is(err, context.DeadlineExceeded) {
 		out.Result = failure(model.StatusTimedOut, fmt.Errorf("wall timeout"))
 		return
@@ -187,7 +191,11 @@ func (r Runner) Run(ctx context.Context, v Variant, req Request) (out Outcome) {
 		return
 	}
 	annotate(&out.Result, filepath.Base(dir), v, req)
-	if err = artifact.RejectSecrets([]string{filepath.Join(dir, "out", "result.json"), filepath.Join(dir, "out", "final.md")}, out.SeededSecrets); err != nil {
+	secretPaths := []string{filepath.Join(dir, "out", "result.json"), filepath.Join(dir, "out", "final.md")}
+	if _, statErr := os.Stat(filepath.Join(dir, "out", "trajectory.json")); statErr == nil {
+		secretPaths = append(secretPaths, filepath.Join(dir, "out", "trajectory.json"))
+	}
+	if err = artifact.RejectSecrets(secretPaths, out.SeededSecrets); err != nil {
 		out.Result = failure(model.StatusInfrastructureInvalid, err)
 		return
 	}
@@ -211,8 +219,8 @@ func annotate(result *model.Result, runID string, v Variant, req Request) {
 	result.NetworkPolicyID = v.NetworkPolicyID
 }
 func defaultCredential(id string) auth.Provider {
-	if id == "dsh-default-codex" {
-		return auth.DSH{}
+	if id == "dsh-default-codex" || id == "dsh-modified-codex" {
+		return auth.DSHCodex{}
 	}
 	return auth.Codex{}
 }

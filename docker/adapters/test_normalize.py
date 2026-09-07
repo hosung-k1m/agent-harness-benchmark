@@ -10,7 +10,7 @@ SCRIPT = pathlib.Path(__file__).with_name("normalize.py")
 
 
 class NormalizeTests(unittest.TestCase):
-    def run_normalizer(self, kind, raw_lines, session_lines=(), exit_code=0, stderr=""):
+    def run_normalizer(self, kind, raw_lines, session_lines=(), exit_code=0, stderr="", include_trajectory=False):
         with tempfile.TemporaryDirectory() as td:
             root = pathlib.Path(td)
             raw = root / "raw"
@@ -33,7 +33,11 @@ class NormalizeTests(unittest.TestCase):
                  str(result), str(final), str(exit_code), "1.25", str(stderr_file)],
                 check=True,
             )
-            return json.loads(result.read_text(encoding="utf-8"))
+            normalized = json.loads(result.read_text(encoding="utf-8"))
+            if include_trajectory:
+                trajectory = json.loads((root / "trajectory.json").read_text(encoding="utf-8"))
+                return normalized, trajectory
+            return normalized
 
     def test_codex_terminal_usage_and_nulls(self):
         record = {
@@ -73,6 +77,20 @@ class NormalizeTests(unittest.TestCase):
         self.assertEqual(result["status"], "unsupported")
         self.assertIn("not pinned", result["failure_reason"])
 
+    def test_dsh_writes_bounded_credential_free_trajectory(self):
+        header = {"event": {"type": "request/header", "data": {"header": {"config": {"provider": "openai-codex", "model": "gpt-5.6-luna", "reasoningEffort": "low"}}}}}
+        event = {"event": {"type": "tool/call", "data": {"name": "subagent_codex", "summary": "delegated work", "token": "must-not-appear"}}}
+        with tempfile.TemporaryDirectory() as td:
+            raw = pathlib.Path(td) / "raw"; raw.write_text("answer")
+            sessions = pathlib.Path(td) / "sessions"; sessions.mkdir()
+            (sessions / "x.jsonl").write_text(json.dumps(header) + "\n" + json.dumps(event) + "\n")
+            result, final = pathlib.Path(td) / "result.json", pathlib.Path(td) / "final.md"
+            subprocess.run([sys.executable, str(SCRIPT), "dsh", str(raw), str(sessions), str(result), str(final), "0", "1", "", "gpt-5.6-luna", "low"], check=True)
+            trajectory = json.loads((pathlib.Path(td) / "trajectory.json").read_text())
+        self.assertEqual(trajectory["source"], "deepseek-harness")
+        self.assertEqual(trajectory["events"][1]["label"], "subagent_codex")
+        self.assertNotIn("must-not-appear", json.dumps(trajectory))
+
     def test_rate_limit_is_failed_even_when_dsh_header_is_missing(self):
         result = self.run_normalizer("dsh", "", stderr="RATE_LIMIT: subscription exhausted")
         self.assertEqual(result["status"], "failed")
@@ -82,6 +100,30 @@ class NormalizeTests(unittest.TestCase):
         result = self.run_normalizer("codex", "", stderr="quota exceeded", exit_code=1)
         self.assertEqual(result["status"], "failed")
         self.assertEqual(result["failure_reason"], "provider quota or rate limit")
+
+    def test_dsh_exports_bounded_playback_events_without_request_payloads(self):
+        events = [
+            {"type": "request/header", "seq": 7, "time": 1000, "data": {"header": {"config": {
+                "provider": "openai-codex", "model": "gpt-5.6-terra", "reasoningEffort": "medium"
+            }, "system": "must-not-be-exported", "tools": [{"secret": "must-not-be-exported"}]}}},
+            {"type": "step/start", "seq": 8, "time": 1015, "data": {"turn": 1, "step": 2}},
+            {"type": "tool/call", "seq": 9, "time": 1025, "data": {
+                "turn": 1, "step": 2, "name": "bash", "arguments": "echo hello"
+            }},
+            {"type": "tool/result", "seq": 10, "time": 1040, "data": {"turn": 1, "step": 2, "message": {
+                "content": [{"type": "tool-result", "content": [{"type": "text", "text": "hello"}]}]
+            }}},
+        ]
+        _, trajectory = self.run_normalizer(
+            "dsh", "answer", events, include_trajectory=True,
+        )
+        self.assertEqual([event["sequence"] for event in trajectory["events"]], [7, 8, 9, 10])
+        self.assertEqual([event["relative_ms"] for event in trajectory["events"]], [0, 15, 25, 40])
+        self.assertEqual(trajectory["events"][2]["label"], "bash")
+        self.assertEqual(trajectory["events"][2]["detail"], "echo hello")
+        self.assertEqual(trajectory["summary"]["tool_counts"], {"bash": 1})
+        encoded = json.dumps(trajectory)
+        self.assertNotIn("must-not-be-exported", encoded)
 
 
 if __name__ == "__main__":

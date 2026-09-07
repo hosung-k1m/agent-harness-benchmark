@@ -63,7 +63,7 @@ func TestDashboardE2EConcurrencyAndPersistentHistory(t *testing.T) {
 	}
 	h := s.Handler("")
 	rr := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/api/runs", strings.NewReader(`{"harness_ids":["codex","dsh"],"case_ids":["alpha","beta"],"workers":1}`))
+	req := httptest.NewRequest(http.MethodPost, "/api/runs", strings.NewReader(`{"harness_ids":["codex-cli","dsh-default-codex"],"case_ids":["alpha","beta"],"workers":1}`))
 	h.ServeHTTP(rr, req)
 	if rr.Code != http.StatusCreated {
 		t.Fatalf("create batch: %d %s", rr.Code, rr.Body.String())
@@ -156,7 +156,7 @@ func TestDashboardE2ESSEProgressThenProviderUsage(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 	}
-	post, err := http.Post(ts.URL+"/api/runs", "application/json", strings.NewReader(`{"harness_ids":["codex"],"case_ids":["one"]}`))
+	post, err := http.Post(ts.URL+"/api/runs", "application/json", strings.NewReader(`{"harness_ids":["codex-cli"],"case_ids":["one"]}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -322,8 +322,8 @@ func TestDashboardStaticPrefersFinalResultUsage(t *testing.T) {
 	}
 	js := string(b)
 	for _, want := range []string{
-		"usage = attempt.result?.usage || attempt.usage",
-		"totalTokens(a.result?.usage || a.usage)",
+		"use=a=>a.result?.usage||a.usage||{}",
+		"let x=$(\"#attempt-template\").content.firstElementChild.cloneNode(true),u=use(a),r=a.result||{}",
 	} {
 		if !strings.Contains(js, want) {
 			t.Fatalf("dashboard must prefer final result usage; missing %q", want)

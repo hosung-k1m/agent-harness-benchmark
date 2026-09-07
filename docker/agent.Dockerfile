@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1.7
 # Single, pinned image shared by both benchmark harnesses.  Build-time network
 # access is intentional; an attempt never installs software.
 FROM node:22.19.0-bookworm AS dsh-build
@@ -28,6 +27,9 @@ RUN ln -s /opt/dsh/apps/cli/lib/bin.js /usr/local/bin/dsh-real \
         ln -s "../.pnpm/node_modules/@deepseek-ai/$name" "$target"; \
       fi; \
     done \
+ && if [ -d /opt/dsh/packages/subagent/subagent-codex ]; then \
+      ln -s /opt/dsh/packages/subagent/subagent-codex /opt/dsh/apps/cli/node_modules/@deepseek-ai/dsh-subagent-codex; \
+    fi \
  && chmod 0555 /usr/local/bin/dsh \
  && find /opt/bench -type f -name '*.sh' -exec chmod 0555 {} + \
  && chmod -R a-w /opt/bench /opt/dsh

@@ -4,6 +4,8 @@ package model
 import (
 	"fmt"
 	"strings"
+
+	"github.com/hosungkim/agent-harness-benchmark/internal/manifest"
 )
 
 type Status string
@@ -111,11 +113,11 @@ func (r Result) Validate() error {
 	if strings.ContainsAny(r.FailureReason, "\r\n") {
 		return fmt.Errorf("failure reason must be single-line")
 	}
-	if r.Model != "" && r.Model != "gpt-5.6-luna" {
-		return fmt.Errorf("unexpected result model")
+	if (r.Model == "") != (r.ReasoningEffort == "") {
+		return fmt.Errorf("result model and reasoning effort must be paired")
 	}
-	if r.ReasoningEffort != "" && r.ReasoningEffort != "low" {
-		return fmt.Errorf("unexpected result reasoning effort")
+	if r.Model != "" && !manifest.ValidModelReasoning(r.Model, r.ReasoningEffort) {
+		return fmt.Errorf("unexpected result model")
 	}
 	if r.NetworkPolicyID != "" && r.NetworkPolicyID != "unrestricted-egress-v1" {
 		return fmt.Errorf("unexpected result network policy")

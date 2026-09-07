@@ -106,7 +106,10 @@ func adapterSources(v run.Variant) []string {
 		filepath.Join("docker", "adapters", "normalize.py"),
 	}
 	if v.ID == "dsh-default-codex" {
-		paths = append(paths, filepath.Join("docker", "adapters", "dsh-bench.patch.yml"))
+		paths = append(paths, filepath.Join("docker", "adapters", "dsh-default-codex.patch.yml"))
+	}
+	if v.ID == "dsh-modified-codex" {
+		paths = append(paths, filepath.Join("docker", "adapters", "dsh-modified-codex.patch.yml"))
 	}
 	return paths
 }
@@ -319,8 +322,8 @@ func doCompare(args []string) error {
 	if *cid != "slugify-v1" || *trials < 1 {
 		return errors.New("--case slugify-v1 and --trials >= 1 are required")
 	}
-	vs := make([]run.Variant, 2)
-	ids := []string{"codex-cli", "dsh-default-codex"}
+	ids := comparisonVariantIDs()
+	vs := make([]run.Variant, len(ids))
 	for i, id := range ids {
 		v, e := variant(id)
 		if e != nil {
@@ -382,7 +385,15 @@ func doCompare(args []string) error {
 			}
 		}
 	}
-	text := compare.RenderMarkdown(*trials, []compare.Summary{*sums[ids[0]], *sums[ids[1]]})
+	rendered := make([]compare.Summary, 0, len(ids))
+	for _, id := range ids {
+		rendered = append(rendered, *sums[id])
+	}
+	text := compare.RenderMarkdown(*trials, rendered)
 	fmt.Print(text)
 	return os.WriteFile(filepath.Join(root, "compare", fmt.Sprintf("%d-summary.md", seed)), []byte(text), 0600)
+}
+
+func comparisonVariantIDs() []string {
+	return []string{"codex-cli", "dsh-default-codex", "dsh-modified-codex"}
 }
