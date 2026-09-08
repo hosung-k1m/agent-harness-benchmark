@@ -119,10 +119,10 @@ type Event struct {
 
 // Config makes execution replaceable for tests and lets the CLI own Docker/image validation.
 type Config struct {
-	CasesDir, BenchmarksDir, DataDir string
-	Workers                          int
-	LoadVariant                      func(string) (run.Variant, error)
-	Execute                          func(context.Context, run.Variant, run.Request) run.Outcome
+	CasesDir, BenchmarksDir, DataDir, ArtifactRoot string
+	Workers                                        int
+	LoadVariant                                    func(string) (run.Variant, error)
+	Execute                                        func(context.Context, run.Variant, run.Request) run.Outcome
 }
 type Server struct {
 	cfg     Config
@@ -140,6 +140,9 @@ func New(cfg Config) (*Server, error) {
 	}
 	if cfg.DataDir == "" {
 		cfg.DataDir = ".bench/batches"
+	}
+	if cfg.ArtifactRoot == "" {
+		cfg.ArtifactRoot = filepath.Join(filepath.Dir(cfg.DataDir), "runs")
 	}
 	if cfg.Workers < 1 {
 		cfg.Workers = 2
@@ -163,10 +166,14 @@ func (s *Server) Handler(staticDir string) http.Handler {
 	mux.HandleFunc("POST /api/cases", s.importCase)
 	mux.HandleFunc("GET /api/runs", s.listBatches)
 	mux.HandleFunc("POST /api/runs", s.createBatch)
+	mux.HandleFunc("DELETE /api/runs", s.deleteBatches)
 	mux.HandleFunc("GET /api/runs/", s.getBatch)
+	mux.HandleFunc("DELETE /api/runs/", s.deleteBatch)
 	mux.HandleFunc("GET /api/batches", s.listBatches)
 	mux.HandleFunc("POST /api/batches", s.createBatch)
+	mux.HandleFunc("DELETE /api/batches", s.deleteBatches)
 	mux.HandleFunc("GET /api/batches/", s.getBatch)
+	mux.HandleFunc("DELETE /api/batches/", s.deleteBatch)
 	mux.HandleFunc("GET /api/attempts/", s.getAttemptArtifact)
 	mux.HandleFunc("GET /api/trajectories/compare", s.compareTrajectories)
 	mux.HandleFunc("POST /api/trajectories/compare", s.compareTrajectories)
@@ -795,6 +802,96 @@ func (s *Server) getBatch(w http.ResponseWriter, r *http.Request) {
 	}
 	jsonOut(w, 200, out)
 }
+
+// deleteBatch removes a completed historical run and its locally saved attempt
+// artifacts. Active runs remain intact so workers cannot write into a deleted record.
+func (s *Server) deleteBatch(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimPrefix(r.URL.Path, "/api/batches/")
+	if strings.HasPrefix(r.URL.Path, "/api/runs/") {
+		id = strings.TrimPrefix(r.URL.Path, "/api/runs/")
+	}
+	if !safeID(id) {
+		apiError(w, http.StatusNotFound, errors.New("batch not found"))
+		return
+	}
+	s.mu.Lock()
+	b := s.batches[id]
+	if b == nil {
+		s.mu.Unlock()
+		apiError(w, http.StatusNotFound, errors.New("batch not found"))
+		return
+	}
+	if b.Status == "queued" || b.Status == "running" {
+		s.mu.Unlock()
+		apiError(w, http.StatusConflict, errors.New("an active run cannot be deleted"))
+		return
+	}
+	delete(s.batches, id)
+	s.mu.Unlock()
+
+	_ = os.Remove(filepath.Join(s.cfg.DataDir, id+".json"))
+	for _, a := range b.Attempts {
+		s.removeArtifact(a.Artifact)
+	}
+	s.emit(Event{Type: "batch-deleted", BatchID: id, At: time.Now().UTC()})
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) deleteBatches(w http.ResponseWriter, r *http.Request) {
+	var request struct {
+		IDs []string `json:"ids"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&request); err != nil || len(request.IDs) == 0 || hasDuplicates(request.IDs) {
+		apiError(w, http.StatusBadRequest, errors.New("provide one or more unique run ids"))
+		return
+	}
+	s.mu.Lock()
+	batches := make([]*Batch, 0, len(request.IDs))
+	for _, id := range request.IDs {
+		if !safeID(id) || s.batches[id] == nil {
+			s.mu.Unlock()
+			apiError(w, http.StatusNotFound, errors.New("batch not found"))
+			return
+		}
+		if s.batches[id].Status == "queued" || s.batches[id].Status == "running" {
+			s.mu.Unlock()
+			apiError(w, http.StatusConflict, errors.New("an active run cannot be deleted"))
+			return
+		}
+		batches = append(batches, s.batches[id])
+	}
+	for _, b := range batches {
+		delete(s.batches, b.ID)
+	}
+	s.mu.Unlock()
+	for _, b := range batches {
+		_ = os.Remove(filepath.Join(s.cfg.DataDir, b.ID+".json"))
+		for _, a := range b.Attempts {
+			s.removeArtifact(a.Artifact)
+		}
+		s.emit(Event{Type: "batch-deleted", BatchID: b.ID, At: time.Now().UTC()})
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) removeArtifact(path string) {
+	if path == "" {
+		return
+	}
+	root, err := filepath.Abs(s.cfg.ArtifactRoot)
+	if err != nil {
+		return
+	}
+	target, err := filepath.Abs(path)
+	if err != nil {
+		return
+	}
+	rel, err := filepath.Rel(root, target)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return
+	}
+	_ = os.RemoveAll(target)
+}
 func (s *Server) logs(w http.ResponseWriter, _ *http.Request, id string) {
 	s.mu.RLock()
 	b := s.batches[id]
@@ -939,8 +1036,8 @@ func trajectoryError(w http.ResponseWriter, err error) {
 }
 
 // POST /api/trajectories/compare accepts {"attempt_ids":["left","right"]}.
-// GET accepts ?left_attempt_id=...&right_attempt_id=.... Both return left/right
-// attempt summaries plus deterministic, index-aligned comparison rows.
+// GET accepts ?left_attempt_id=...&right_attempt_id=.... Both return raw
+// trajectory summaries plus behavioral, identity-aligned comparison rows.
 func (s *Server) compareTrajectories(w http.ResponseWriter, r *http.Request) {
 	var ids []string
 	if r.Method == http.MethodGet {
@@ -985,36 +1082,187 @@ func (s *Server) compareTrajectories(w http.ResponseWriter, r *http.Request) {
 		trajectoryError(w, err)
 		return
 	}
-	rows := make([]map[string]any, 0, max(len(lt.Events), len(rt.Events)))
-	for i := 0; i < max(len(lt.Events), len(rt.Events)); i++ {
-		row := map[string]any{"index": i, "same": i < len(lt.Events) && i < len(rt.Events) && semanticEventEqual(lt.Events[i], rt.Events[i])}
-		if i < len(lt.Events) {
-			row["left"] = json.RawMessage(lt.Events[i])
-			row["left_type"] = trajectoryEventType(lt.Events[i])
+	rows := alignBehavioralEvents(behavioralEvents(lt.Events), behavioralEvents(rt.Events))
+	changed, leftOnly, rightOnly := 0, 0, 0
+	for _, row := range rows {
+		switch row["status"] {
+		case "changed":
+			changed++
+		case "left_only":
+			leftOnly++
+		case "right_only":
+			rightOnly++
 		}
-		if i < len(rt.Events) {
-			row["right"] = json.RawMessage(rt.Events[i])
-			row["right_type"] = trajectoryEventType(rt.Events[i])
+	}
+	jsonOut(w, http.StatusOK, map[string]any{"left": trajectorySummary(left, lt), "right": trajectorySummary(right, rt), "left_raw_events": lt.Events, "right_raw_events": rt.Events, "rows": rows, "comparison": map[string]any{"behavioral_event_count": len(rows), "changed": changed, "left_only": leftOnly, "right_only": rightOnly, "different": changed + leftOnly + rightOnly, "summary": comparisonSummary(changed, leftOnly, rightOnly)}})
+}
+
+func comparisonSummary(changed, leftOnly, rightOnly int) string {
+	if changed+leftOnly+rightOnly == 0 {
+		return "No behavioral differences"
+	}
+	return fmt.Sprintf("%d behavioral difference(s): %d changed, %d left-only, %d right-only", changed+leftOnly+rightOnly, changed, leftOnly, rightOnly)
+}
+
+type behavioralEvent struct {
+	raw      json.RawMessage
+	index    int
+	identity string
+}
+
+func behavioralEvents(events []json.RawMessage) []behavioralEvent {
+	out := make([]behavioralEvent, 0, len(events))
+	for i, raw := range events {
+		if identity, ok := behavioralIdentity(raw); ok {
+			out = append(out, behavioralEvent{raw: raw, index: i, identity: identity})
+		}
+	}
+	return out
+}
+
+// behavioralIdentity removes transport plumbing (stream chunks, block endings,
+// usage/finish records, and request metadata) before alignment. The original
+// raw records remain available through each attempt's trajectory endpoint.
+func behavioralIdentity(raw json.RawMessage) (string, bool) {
+	var event map[string]any
+	if json.Unmarshal(raw, &event) != nil {
+		return "", false
+	}
+	typ, category, label := strings.ToLower(fmt.Sprint(event["type"])), strings.ToLower(fmt.Sprint(event["category"])), strings.ToLower(fmt.Sprint(event["label"]))
+	normalizedType := strings.NewReplacer("_", "/", "-", "/").Replace(typ)
+	switch normalizedType {
+	case "assistant/chunk", "assistant/block/end", "block/end", "usage", "finish", "assistant/finish", "request/header", "request/context":
+		return "", false
+	}
+	if typ == "" {
+		typ = category
+	}
+	if label != "" {
+		return typ + "|" + label, true
+	}
+	return typ + "|" + category, typ != ""
+}
+
+func alignBehavioralEvents(left, right []behavioralEvent) []map[string]any {
+	// A weighted LCS prefers exact semantic matches over merely matching event
+	// identities. This avoids consuming a later exact repeated tool call as an
+	// earlier changed call, while still pairing a sole changed identity.
+	dp := make([][]int, len(left)+1)
+	for i := range dp {
+		dp[i] = make([]int, len(right)+1)
+	}
+	pairScore := func(l, r behavioralEvent) int {
+		if l.identity != r.identity {
+			return 0
+		}
+		if semanticEventEqual(l.raw, r.raw) {
+			return 3
+		}
+		return 1
+	}
+	for i := len(left) - 1; i >= 0; i-- {
+		for j := len(right) - 1; j >= 0; j-- {
+			pair, down, across := pairScore(left[i], right[j])+dp[i+1][j+1], dp[i+1][j], dp[i][j+1]
+			dp[i][j] = max(pair, max(down, across))
+		}
+	}
+	rows := []map[string]any{}
+	i, j := 0, 0
+	add := func(status string, l *behavioralEvent, r *behavioralEvent) {
+		row := map[string]any{"status": status, "same": status == "same"}
+		if l != nil {
+			row["left"], row["left_index"], row["left_type"] = l.raw, l.index, trajectoryEventType(l.raw)
+		}
+		if r != nil {
+			row["right"], row["right_index"], row["right_type"] = r.raw, r.index, trajectoryEventType(r.raw)
+		}
+		if status == "changed" || status == "left_only" || status == "right_only" {
+			row["differences"] = trajectoryEventDifferences(row["left"], row["right"])
 		}
 		rows = append(rows, row)
 	}
-	jsonOut(w, http.StatusOK, map[string]any{"left": trajectorySummary(left, lt), "right": trajectorySummary(right, rt), "rows": rows})
+	for i < len(left) || j < len(right) {
+		if i < len(left) && j < len(right) && pairScore(left[i], right[j]) > 0 && pairScore(left[i], right[j])+dp[i+1][j+1] >= dp[i+1][j] && pairScore(left[i], right[j])+dp[i+1][j+1] >= dp[i][j+1] {
+			status := "changed"
+			if semanticEventEqual(left[i].raw, right[j].raw) {
+				status = "same"
+			}
+			add(status, &left[i], &right[j])
+			i++
+			j++
+		} else if j >= len(right) || (i < len(left) && dp[i+1][j] >= dp[i][j+1]) {
+			add("left_only", &left[i], nil)
+			i++
+		} else {
+			add("right_only", nil, &right[j])
+			j++
+		}
+	}
+	return rows
 }
 
-// semanticEventEqual deliberately ignores adapter bookkeeping that is expected
-// to differ between otherwise equivalent trajectories. Payload fields remain
-// intact, including usage_delta, so comparison remains meaningful.
+// trajectoryEventDifferences keeps the comparison useful to a human: it names
+// the fields that changed after volatile bookkeeping has been removed. Values
+// are deliberately returned as JSON so the browser can render strings and
+// structured payloads without lossy formatting.
+func trajectoryEventDifferences(left, right any) []map[string]any {
+	var l, r any
+	if raw, ok := left.(json.RawMessage); ok {
+		_ = json.Unmarshal(semanticEventJSON(raw), &l)
+	}
+	if raw, ok := right.(json.RawMessage); ok {
+		_ = json.Unmarshal(semanticEventJSON(raw), &r)
+	}
+	changes := []map[string]any{}
+	collectTrajectoryDifferences("", l, r, &changes)
+	return changes
+}
+
+func collectTrajectoryDifferences(path string, left, right any, changes *[]map[string]any) {
+	lm, lok := left.(map[string]any)
+	rm, rok := right.(map[string]any)
+	if lok && rok {
+		keys := map[string]bool{}
+		for k := range lm {
+			keys[k] = true
+		}
+		for k := range rm {
+			keys[k] = true
+		}
+		orderedKeys := make([]string, 0, len(keys))
+		for k := range keys {
+			orderedKeys = append(orderedKeys, k)
+		}
+		sort.Strings(orderedKeys)
+		for _, k := range orderedKeys {
+			next := k
+			if path != "" {
+				next = path + "." + k
+			}
+			collectTrajectoryDifferences(next, lm[k], rm[k], changes)
+		}
+		return
+	}
+	lb, _ := json.Marshal(left)
+	rb, _ := json.Marshal(right)
+	if string(lb) != string(rb) {
+		*changes = append(*changes, map[string]any{"field": path, "left": left, "right": right})
+	}
+}
+
+// semanticEventEqual ignores only top-level adapter bookkeeping. Nested tool
+// payloads remain intact so a real input/result change is never hidden.
 func semanticEventEqual(left, right json.RawMessage) bool {
 	l, r := semanticEventJSON(left), semanticEventJSON(right)
 	return l != nil && r != nil && string(l) == string(r)
 }
 
 func semanticEventJSON(raw json.RawMessage) []byte {
-	var event map[string]json.RawMessage
+	var event map[string]any
 	if json.Unmarshal(raw, &event) != nil {
 		return nil
 	}
-	for _, key := range []string{"index", "sequence", "relative_ms", "timestamp", "time"} {
+	for _, key := range []string{"index", "sequence", "relative_ms", "timestamp", "time", "turn", "step", "usage_delta"} {
 		delete(event, key)
 	}
 	canonical, err := json.Marshal(event)

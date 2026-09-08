@@ -1,0 +1,9 @@
+(() => { "use strict";
+const selected = new Set(), attempts = new Map(), button = document.querySelector("#delete-selected"), host = document.querySelector("#attempts");
+const sync = () => { button.disabled = !selected.size; button.textContent = selected.size ? `Delete selected (${selected.size})` : "Delete selected" };
+const loadAttempts = async () => { try { let r = await fetch("/api/runs"), batches = await r.json(); for (let batch of batches) for (let attempt of batch.attempts || []) attempts.set(attempt.id, batch.id); render() } catch (_) {} };
+const render = () => document.querySelectorAll(".attempt").forEach(card => { if (card.querySelector(".bulk-delete-pick")) return; let id = card.querySelector(".attempt-subtitle")?.textContent.match(/([a-f0-9]{16})\s*$/)?.[1], batch = attempts.get(id); if (!batch) return; let label = document.createElement("label"), input = document.createElement("input"); label.className = "delete-pick bulk-delete-pick"; input.type = "checkbox"; input.checked = selected.has(batch); input.onchange = () => { input.checked ? selected.add(batch) : selected.delete(batch); render(); sync() }; label.append(input, document.createTextNode(" Select run")); card.querySelector(".attempt-actions")?.prepend(label) });
+button.onclick = async () => { let ids = [...selected]; if (!ids.length || !confirm(`Delete ${ids.length} selected run${ids.length === 1 ? "" : "s"} and all saved artifacts? This cannot be undone.`)) return; try { let r = await fetch("/api/runs", { method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ids }) }); if (!r.ok) throw Error((await r.json()).error || "Delete failed"); location.reload() } catch (error) { alert(error.message) } };
+new MutationObserver(render).observe(host, { childList: true });
+sync(); loadAttempts();
+})();

@@ -62,7 +62,7 @@ func serve(args []string) error {
 		return err
 	}
 	s, err := benchweb.New(benchweb.Config{
-		CasesDir: "cases", DataDir: filepath.Join(root, "batches"), Workers: *workers,
+		CasesDir: "cases", DataDir: filepath.Join(root, "batches"), ArtifactRoot: filepath.Join(root, "runs"), Workers: *workers,
 		LoadVariant: variant,
 		Execute: func(ctx context.Context, v run.Variant, req run.Request) run.Outcome {
 			return runner().Run(ctx, v, req)

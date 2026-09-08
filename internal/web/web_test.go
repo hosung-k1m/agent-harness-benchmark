@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -74,6 +75,73 @@ func TestBatchConfigurationIsValidatedAndSnapshotted(t *testing.T) {
 	}
 }
 
+func TestDeleteCompletedRunRemovesHistoryAndArtifacts(t *testing.T) {
+	s, h, _ := newTestServer(t, func(context.Context, run.Variant, run.Request) run.Outcome { return run.Outcome{} })
+	artifacts := filepath.Join(t.TempDir(), "runs")
+	if err := os.MkdirAll(artifacts, 0700); err != nil {
+		t.Fatal(err)
+	}
+	s.cfg.ArtifactRoot = artifacts
+	dir, err := os.MkdirTemp(artifacts, "attempt-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := &Batch{ID: "finished-run", CreatedAt: time.Now().UTC(), Status: "completed", Attempts: []*Attempt{{ID: "finished-attempt", BatchID: "finished-run", Artifact: dir, Status: "completed"}}}
+	s.mu.Lock()
+	s.batches[b.ID] = b
+	s.mu.Unlock()
+	s.persist(b)
+
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest(http.MethodDelete, "/api/runs/finished-run", nil))
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("delete: %d %s", w.Code, w.Body.String())
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("artifact still exists: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(s.cfg.DataDir, b.ID+".json")); !os.IsNotExist(err) {
+		t.Fatalf("history still exists: %v", err)
+	}
+	missing := httptest.NewRecorder()
+	h.ServeHTTP(missing, httptest.NewRequest(http.MethodGet, "/api/runs/finished-run", nil))
+	if missing.Code != http.StatusNotFound {
+		t.Fatalf("deleted run lookup: %d", missing.Code)
+	}
+
+	s.mu.Lock()
+	s.batches["active-run"] = &Batch{ID: "active-run", Status: "running"}
+	s.mu.Unlock()
+	active := httptest.NewRecorder()
+	h.ServeHTTP(active, httptest.NewRequest(http.MethodDelete, "/api/runs/active-run", nil))
+	if active.Code != http.StatusConflict {
+		t.Fatalf("active delete: %d %s", active.Code, active.Body.String())
+	}
+}
+
+func TestDeleteMultipleCompletedRuns(t *testing.T) {
+	s, h, _ := newTestServer(t, func(context.Context, run.Variant, run.Request) run.Outcome { return run.Outcome{} })
+	for _, id := range []string{"first-run", "second-run"} {
+		batch := &Batch{ID: id, CreatedAt: time.Now().UTC(), Status: "completed"}
+		s.mu.Lock()
+		s.batches[id] = batch
+		s.mu.Unlock()
+		s.persist(batch)
+	}
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest(http.MethodDelete, "/api/runs", strings.NewReader(`{"ids":["first-run","second-run"]}`)))
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("bulk delete: %d %s", w.Code, w.Body.String())
+	}
+	for _, id := range []string{"first-run", "second-run"} {
+		out := httptest.NewRecorder()
+		h.ServeHTTP(out, httptest.NewRequest(http.MethodGet, "/api/runs/"+id, nil))
+		if out.Code != http.StatusNotFound {
+			t.Fatalf("deleted batch %q status: %d", id, out.Code)
+		}
+	}
+}
+
 func TestCatalogExposesThreeHarnessChoicesAndMatrix(t *testing.T) {
 	root := t.TempDir()
 	old, _ := os.Getwd()
@@ -135,7 +203,7 @@ func TestTrajectoryAndComparisonSafety(t *testing.T) {
 	}
 	w = httptest.NewRecorder()
 	h.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/api/trajectories/compare", strings.NewReader(`{"attempt_ids":["aaaa","bbbb"]}`)))
-	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"same":false`) {
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"same":false`) || !strings.Contains(w.Body.String(), `"differences"`) {
 		t.Fatalf("comparison: %d %s", w.Code, w.Body.String())
 	}
 	// A symlinked trajectory that escapes the owned out directory must never be exposed.
@@ -161,6 +229,60 @@ func TestTrajectoryComparisonIgnoresVolatileEventMetadata(t *testing.T) {
 	semanticChange := json.RawMessage(`{"sequence":2,"relative_ms":11,"type":"tool","category":"tool","label":"search","detail":"different docs","usage_delta":{"input_tokens":3}}`)
 	if semanticEventEqual(left, semanticChange) {
 		t.Fatal("semantic detail changes must compare as changed")
+	}
+	usageOnly := json.RawMessage(`{"type":"tool","category":"tool","label":"search","detail":"docs","usage_delta":{"input_tokens":999}}`)
+	if !semanticEventEqual(left, usageOnly) {
+		t.Fatal("usage_delta-only changes must compare as the same event")
+	}
+}
+
+func TestBehavioralTrajectoryAlignmentFiltersTransportAndPreservesToolMatches(t *testing.T) {
+	left := []json.RawMessage{
+		json.RawMessage(`{"type":"request_context","category":"model"}`),
+		json.RawMessage(`{"type":"assistant","label":"plan","content":"do it"}`),
+		json.RawMessage(`{"type":"tool","label":"search","input":{"q":"docs"},"result":"ok"}`),
+	}
+	right := []json.RawMessage{
+		json.RawMessage(`{"type":"request_header","category":"model"}`),
+		json.RawMessage(`{"type":"assistant_chunk","content":"do"}`),
+		json.RawMessage(`{"type":"assistant","label":"plan","content":"do it","usage_delta":{"output_tokens":3}}`),
+		json.RawMessage(`{"type":"tool","label":"search","input":{"q":"docs"},"result":"ok"}`),
+		json.RawMessage(`{"type":"finish","usage_delta":{"output_tokens":4}}`),
+	}
+	rows := alignBehavioralEvents(behavioralEvents(left), behavioralEvents(right))
+	if len(rows) != 2 || rows[0]["status"] != "same" || rows[1]["status"] != "same" || rows[1]["left_index"] != 2 || rows[1]["right_index"] != 3 {
+		t.Fatalf("transport insertion shifted behavioral alignment: %#v", rows)
+	}
+	changed := alignBehavioralEvents(behavioralEvents([]json.RawMessage{json.RawMessage(`{"type":"tool","label":"search","input":{"q":"a"},"result":"ok"}`)}), behavioralEvents([]json.RawMessage{json.RawMessage(`{"type":"tool","label":"search","input":{"q":"b"},"result":"different"}`)}))
+	if len(changed) != 1 || changed[0]["status"] != "changed" || len(changed[0]["differences"].([]map[string]any)) != 2 {
+		t.Fatalf("tool payload changes must be behavioral differences: %#v", changed)
+	}
+}
+
+func TestBehavioralTrajectoryAlignmentPrefersLaterExactRepeatedIdentity(t *testing.T) {
+	left := behavioralEvents([]json.RawMessage{
+		json.RawMessage(`{"type":"tool","label":"search","input":{"q":"a"}}`),
+		json.RawMessage(`{"type":"tool","label":"search","input":{"q":"b"}}`),
+	})
+	right := behavioralEvents([]json.RawMessage{json.RawMessage(`{"type":"tool","label":"search","input":{"q":"b"}}`)})
+	rows := alignBehavioralEvents(left, right)
+	if len(rows) != 2 || rows[0]["status"] != "left_only" || rows[1]["status"] != "same" || rows[1]["left_index"] != 1 || rows[1]["right_index"] != 0 {
+		t.Fatalf("later exact repeated identity was mispaired: %#v", rows)
+	}
+}
+
+func TestBehavioralTrajectoryPreservesNestedPayloadAndToolLabels(t *testing.T) {
+	left := json.RawMessage(`{"type":"tool","label":"usage-report","input":{"time":"A"}}`)
+	right := json.RawMessage(`{"type":"tool","label":"usage-report","input":{"time":"B"}}`)
+	if semanticEventEqual(left, right) {
+		t.Fatal("nested tool payload time must remain a behavioral difference")
+	}
+	rows := alignBehavioralEvents(behavioralEvents([]json.RawMessage{left}), behavioralEvents([]json.RawMessage{right}))
+	if len(rows) != 1 || rows[0]["status"] != "changed" {
+		t.Fatalf("usage-report tool was filtered or not compared: %#v", rows)
+	}
+	if !strings.Contains(fmt.Sprint(rows[0]["differences"]), "input.time") {
+		t.Fatalf("nested input difference missing: %#v", rows[0]["differences"])
 	}
 }
 

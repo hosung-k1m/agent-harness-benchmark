@@ -19,7 +19,17 @@ func TestDashboardRendersAndSubmitsBenchmarkTasks(t *testing.T) {
 		"task.token_budget",
 		"benchmark_task_ids:benchmarkTasks()",
 		"local=cases().length,benchmark=benchmarkTasks().length",
-		"function scenarioResults(all)",
+		"function caseDetails(a)",
+		"function benchmarkRuns(all)",
+		"function compareView(name,events)",
+		"No behavioral differences",
+		"let exact=`${e?.type||\"\"} ${e?.label||\"\"}`.toLowerCase()",
+		"/tool|function|command|shell|browser|exec/.test(exact))return\"tools\"",
+		"/request.*header|header.*request/.test(exact))return\"model\"",
+		"/user|context/.test(exact))return\"input\"",
+		"/assistant|model|response|completion|reasoning|llm/.test(exact))return\"model\"",
+		"/request|input|message/.test(exact))return\"input\"",
+		"Deterministic test case",
 		"Deterministic verifier:",
 		"[\"attempt\",\"progress\"]",
 	} {
@@ -37,11 +47,17 @@ func TestDashboardRendersAndSubmitsBenchmarkTasks(t *testing.T) {
 		"<legend>4. Benchmarks</legend>",
 		"id=\"benchmark-list\"",
 		"aria-live=\"polite\"",
-		"id=\"scenario-results\"",
-		"Each harness verdict appears as soon as that agent finishes.",
+		"data-stat=\"result\"",
+		"Details <span",
+		"id=\"benchmark-runs\"",
 	} {
 		if !strings.Contains(string(html), want) {
 			t.Fatalf("dashboard markup missing %q", want)
+		}
+	}
+	for _, removed := range []string{"scenario-results", "Benchmark scenario results"} {
+		if strings.Contains(string(html), removed) {
+			t.Fatalf("obsolete scenario panel still rendered: %q", removed)
 		}
 	}
 }
