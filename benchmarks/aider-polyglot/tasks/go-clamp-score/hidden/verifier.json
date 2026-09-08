@@ -1,0 +1,1 @@
+{"visible_command":["go","test","./..."],"hidden_command":["python3","{hidden_tests}/test_hidden.py"],"timeout_seconds":30}

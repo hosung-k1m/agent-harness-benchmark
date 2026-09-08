@@ -1,0 +1,1 @@
+{"visible_command":["python3","-m","unittest","discover","-s","tests"],"hidden_command":["python3","-m","unittest","discover","-s","{hidden_tests}"],"timeout_seconds":30}

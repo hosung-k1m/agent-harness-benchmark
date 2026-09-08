@@ -39,6 +39,30 @@ type Case struct {
 	Prompt     string `json:"prompt"`
 	HasFixture bool   `json:"has_fixture"`
 }
+
+// Benchmark describes an on-disk benchmark suite. Tasks live directly below
+// the suite's benchmark.json file and use the same prompt/fixture/hidden
+// layout as local cases.
+type Benchmark struct {
+	ID          string          `json:"id"`
+	Name        string          `json:"name"`
+	Description string          `json:"description,omitempty"`
+	Provenance  json.RawMessage `json:"provenance,omitempty"`
+	Evaluator   json.RawMessage `json:"evaluator,omitempty"`
+	TaskCount   int             `json:"task_count"`
+	Tasks       []BenchmarkTask `json:"tasks"`
+}
+type BenchmarkTask struct {
+	ID          string          `json:"id"`
+	BenchmarkID string          `json:"benchmark_id"`
+	TaskID      string          `json:"task_id"`
+	Name        string          `json:"name"`
+	Prompt      string          `json:"prompt"`
+	Provenance  json.RawMessage `json:"provenance,omitempty"`
+	Evaluator   json.RawMessage `json:"evaluator,omitempty"`
+	TokenBudget json.RawMessage `json:"token_budget,omitempty"`
+	HasFixture  bool            `json:"has_fixture"`
+}
 type Harness struct {
 	ID                  string        `json:"id"`
 	DisplayName         string        `json:"display_name"`
@@ -55,24 +79,30 @@ type ModelOption struct {
 	ReasoningEfforts []string `json:"reasoning_efforts"`
 }
 type Attempt struct {
-	ID                  string        `json:"id"`
-	BatchID             string        `json:"batch_id"`
-	CaseID              string        `json:"case_id"`
-	VariantID           string        `json:"variant_id"`
-	DisplayName         string        `json:"display_name,omitempty"`
-	HarnessKind         string        `json:"harness_kind,omitempty"`
-	TrajectoryAvailable bool          `json:"trajectory_available"`
-	Model               string        `json:"model,omitempty"`
-	ReasoningEffort     string        `json:"reasoning_effort,omitempty"`
-	PluginMode          string        `json:"plugin_mode,omitempty"`
-	PluginRevision      string        `json:"plugin_revision,omitempty"`
-	Status              string        `json:"status"`
-	StartedAt           *time.Time    `json:"started_at,omitempty"`
-	FinishedAt          *time.Time    `json:"finished_at,omitempty"`
-	ElapsedMillis       int64         `json:"elapsed_millis"`
-	Result              *model.Result `json:"result,omitempty"`
-	Artifact            string        `json:"artifact,omitempty"`
-	Error               string        `json:"error,omitempty"`
+	ID                  string          `json:"id"`
+	BatchID             string          `json:"batch_id"`
+	CreatedAt           time.Time       `json:"created_at"`
+	CaseID              string          `json:"case_id"`
+	BenchmarkID         string          `json:"benchmark_id,omitempty"`
+	BenchmarkTaskID     string          `json:"benchmark_task_id,omitempty"`
+	Provenance          json.RawMessage `json:"provenance,omitempty"`
+	Evaluator           json.RawMessage `json:"evaluator,omitempty"`
+	VariantID           string          `json:"variant_id"`
+	DisplayName         string          `json:"display_name,omitempty"`
+	HarnessKind         string          `json:"harness_kind,omitempty"`
+	TrajectoryAvailable bool            `json:"trajectory_available"`
+	Model               string          `json:"model,omitempty"`
+	ReasoningEffort     string          `json:"reasoning_effort,omitempty"`
+	PluginMode          string          `json:"plugin_mode,omitempty"`
+	PluginRevision      string          `json:"plugin_revision,omitempty"`
+	Status              string          `json:"status"`
+	StartedAt           *time.Time      `json:"started_at,omitempty"`
+	FinishedAt          *time.Time      `json:"finished_at,omitempty"`
+	ElapsedMillis       int64           `json:"elapsed_millis"`
+	Result              *model.Result   `json:"result,omitempty"`
+	Verdict             string          `json:"verdict,omitempty"`
+	Artifact            string          `json:"artifact,omitempty"`
+	Error               string          `json:"error,omitempty"`
 }
 type Batch struct {
 	ID        string     `json:"id"`
@@ -89,10 +119,10 @@ type Event struct {
 
 // Config makes execution replaceable for tests and lets the CLI own Docker/image validation.
 type Config struct {
-	CasesDir, DataDir string
-	Workers           int
-	LoadVariant       func(string) (run.Variant, error)
-	Execute           func(context.Context, run.Variant, run.Request) run.Outcome
+	CasesDir, BenchmarksDir, DataDir string
+	Workers                          int
+	LoadVariant                      func(string) (run.Variant, error)
+	Execute                          func(context.Context, run.Variant, run.Request) run.Outcome
 }
 type Server struct {
 	cfg     Config
@@ -104,6 +134,9 @@ type Server struct {
 func New(cfg Config) (*Server, error) {
 	if cfg.CasesDir == "" {
 		cfg.CasesDir = "cases"
+	}
+	if cfg.BenchmarksDir == "" {
+		cfg.BenchmarksDir = "benchmarks"
 	}
 	if cfg.DataDir == "" {
 		cfg.DataDir = ".bench/batches"
@@ -238,7 +271,12 @@ func (s *Server) catalog(w http.ResponseWriter, _ *http.Request) {
 		}
 		cs = append(cs, map[string]any{"id": x.ID, "name": x.ID, "prompt_preview": preview, "source_type": "files"})
 	}
-	jsonOut(w, 200, map[string]any{"harnesses": h, "cases": cs})
+	benchmarks, err := s.benchmarkList()
+	if err != nil {
+		apiError(w, 500, err)
+		return
+	}
+	jsonOut(w, 200, map[string]any{"harnesses": h, "cases": cs, "benchmarks": benchmarks})
 }
 
 func describeVariant(v run.Variant) Harness {
@@ -304,6 +342,112 @@ func (s *Server) caseList() ([]Case, error) {
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out, nil
 }
+
+// benchmarkList deliberately discovers task directories instead of trusting a
+// manifest task list. This keeps suites portable: a task is runnable exactly
+// when its prompt and fixture are present on disk. Manifest task data is used
+// only to enrich names and evaluator/provenance metadata.
+func (s *Server) benchmarkList() ([]Benchmark, error) {
+	entries, err := os.ReadDir(s.cfg.BenchmarksDir)
+	if os.IsNotExist(err) {
+		return []Benchmark{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	out := []Benchmark{}
+	for _, entry := range entries {
+		if !entry.IsDir() || !safeID(entry.Name()) {
+			continue
+		}
+		dir := filepath.Join(s.cfg.BenchmarksDir, entry.Name())
+		data, err := os.ReadFile(filepath.Join(dir, "benchmark.json"))
+		if err != nil {
+			continue
+		}
+		var manifest struct {
+			ID, Name, Description           string
+			TaskCount                       int `json:"task_count"`
+			Provenance, Evaluator, Upstream json.RawMessage
+			Tasks                           []struct {
+				ID                    string
+				Name                  string
+				Title                 string
+				Path                  string
+				Provenance, Evaluator json.RawMessage
+				TokenBudget           json.RawMessage `json:"token_budget"`
+			} `json:"tasks"`
+		}
+		if json.Unmarshal(data, &manifest) != nil {
+			continue
+		}
+		// Directory name is the authority for safe, stable references. A suite
+		// may omit id, but cannot point this server at another directory.
+		if manifest.ID != "" && manifest.ID != entry.Name() {
+			continue
+		}
+		b := Benchmark{ID: entry.Name(), Name: manifest.Name, Description: manifest.Description, Provenance: manifest.Provenance, Evaluator: manifest.Evaluator, TaskCount: manifest.TaskCount}
+		if b.Name == "" {
+			b.Name = b.ID
+		}
+		if len(b.Provenance) == 0 {
+			b.Provenance = manifest.Upstream
+		}
+		meta := map[string]struct {
+			Name                               string
+			Provenance, Evaluator, TokenBudget json.RawMessage
+		}{}
+		for _, task := range manifest.Tasks {
+			name := task.Name
+			if name == "" {
+				name = task.Title
+			}
+			meta[task.ID] = struct {
+				Name                               string
+				Provenance, Evaluator, TokenBudget json.RawMessage
+			}{name, task.Provenance, task.Evaluator, task.TokenBudget}
+		}
+		taskRoot := filepath.Join(dir, "tasks")
+		taskEntries, err := os.ReadDir(taskRoot)
+		if err != nil {
+			return nil, err
+		}
+		for _, taskEntry := range taskEntries {
+			if !taskEntry.IsDir() || !safeID(taskEntry.Name()) {
+				continue
+			}
+			taskDir := filepath.Join(taskRoot, taskEntry.Name())
+			prompt, err := os.ReadFile(filepath.Join(taskDir, "prompt.txt"))
+			if err != nil {
+				continue
+			}
+			_, fixtureErr := os.Stat(filepath.Join(taskDir, "fixture"))
+			if fixtureErr != nil {
+				continue
+			}
+			m := meta[taskEntry.Name()]
+			t := BenchmarkTask{ID: b.ID + "/" + taskEntry.Name(), BenchmarkID: b.ID, TaskID: taskEntry.Name(), Name: m.Name, Prompt: string(prompt), Provenance: b.Provenance, Evaluator: b.Evaluator, TokenBudget: m.TokenBudget, HasFixture: true}
+			if t.Name == "" {
+				t.Name = t.TaskID
+			}
+			if len(m.Provenance) != 0 {
+				t.Provenance = m.Provenance
+			}
+			if len(m.Evaluator) != 0 {
+				t.Evaluator = m.Evaluator
+			}
+			b.Tasks = append(b.Tasks, t)
+		}
+		sort.Slice(b.Tasks, func(i, j int) bool { return b.Tasks[i].ID < b.Tasks[j].ID })
+		// The catalog advertises only tasks that have a runnable on-disk capsule.
+		// A stale manifest count must not cause the selection UI to over-promise.
+		b.TaskCount = len(b.Tasks)
+		out = append(out, b)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out, nil
+}
+
 func (s *Server) cases(w http.ResponseWriter, _ *http.Request) {
 	out, err := s.caseList()
 	if err != nil {
@@ -314,12 +458,13 @@ func (s *Server) cases(w http.ResponseWriter, _ *http.Request) {
 }
 
 type batchRequest struct {
-	VariantIDs      []string `json:"variant_ids"`
-	HarnessIDs      []string `json:"harness_ids"`
-	CaseIDs         []string `json:"case_ids"`
-	Workers         int      `json:"workers"`
-	Model           string   `json:"model"`
-	ReasoningEffort string   `json:"reasoning_effort"`
+	VariantIDs       []string `json:"variant_ids"`
+	HarnessIDs       []string `json:"harness_ids"`
+	CaseIDs          []string `json:"case_ids"`
+	BenchmarkTaskIDs []string `json:"benchmark_task_ids"`
+	Workers          int      `json:"workers"`
+	Model            string   `json:"model"`
+	ReasoningEffort  string   `json:"reasoning_effort"`
 }
 
 func (s *Server) createBatch(w http.ResponseWriter, r *http.Request) {
@@ -331,15 +476,16 @@ func (s *Server) createBatch(w http.ResponseWriter, r *http.Request) {
 	if len(req.VariantIDs) == 0 {
 		req.VariantIDs = req.HarnessIDs
 	}
-	if len(req.VariantIDs) == 0 || len(req.CaseIDs) == 0 {
-		apiError(w, 400, errors.New("select at least one harness and case"))
+	if len(req.VariantIDs) == 0 || len(req.CaseIDs)+len(req.BenchmarkTaskIDs) == 0 {
+		apiError(w, 400, errors.New("select at least one harness and case or benchmark task"))
 		return
 	}
-	if hasDuplicates(req.VariantIDs) || hasDuplicates(req.CaseIDs) {
-		apiError(w, 400, errors.New("harnesses and cases must not contain duplicates"))
+	if hasDuplicates(req.VariantIDs) || hasDuplicates(req.CaseIDs) || hasDuplicates(req.BenchmarkTaskIDs) {
+		apiError(w, 400, errors.New("harnesses, cases, and benchmark tasks must not contain duplicates"))
 		return
 	}
-	if len(req.VariantIDs) > maxBatchAttempts/len(req.CaseIDs) {
+	selectedCount := len(req.CaseIDs) + len(req.BenchmarkTaskIDs)
+	if len(req.VariantIDs) > maxBatchAttempts/selectedCount {
 		apiError(w, 400, fmt.Errorf("a batch may contain at most %d attempts", maxBatchAttempts))
 		return
 	}
@@ -388,12 +534,37 @@ func (s *Server) createBatch(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	benchmarks, err := s.benchmarkList()
+	if err != nil {
+		apiError(w, 500, err)
+		return
+	}
+	benchmarkTasks := map[string]BenchmarkTask{}
+	for _, benchmark := range benchmarks {
+		for _, task := range benchmark.Tasks {
+			benchmarkTasks[task.ID] = task
+		}
+	}
+	for _, id := range req.BenchmarkTaskIDs {
+		if _, ok := benchmarkTasks[id]; !ok {
+			apiError(w, 400, fmt.Errorf("unknown benchmark task %q", id))
+			return
+		}
+	}
 	b := &Batch{ID: newID(), CreatedAt: time.Now().UTC(), Status: "queued"}
 	for _, cid := range req.CaseIDs {
 		for _, vid := range req.VariantIDs {
 			v := variants[vid]
 			d := describeVariant(v)
-			b.Attempts = append(b.Attempts, &Attempt{ID: newID(), BatchID: b.ID, CaseID: cid, VariantID: vid, DisplayName: d.DisplayName, HarnessKind: d.Kind, TrajectoryAvailable: d.TrajectoryAvailable, Model: v.Model, ReasoningEffort: v.ReasoningEffort, PluginMode: d.PluginMode, PluginRevision: d.PluginRevision, Status: "queued"})
+			b.Attempts = append(b.Attempts, &Attempt{ID: newID(), BatchID: b.ID, CreatedAt: b.CreatedAt, CaseID: cid, VariantID: vid, DisplayName: d.DisplayName, HarnessKind: d.Kind, TrajectoryAvailable: d.TrajectoryAvailable, Model: v.Model, ReasoningEffort: v.ReasoningEffort, PluginMode: d.PluginMode, PluginRevision: d.PluginRevision, Status: "queued"})
+		}
+	}
+	for _, tid := range req.BenchmarkTaskIDs {
+		task := benchmarkTasks[tid]
+		for _, vid := range req.VariantIDs {
+			v := variants[vid]
+			d := describeVariant(v)
+			b.Attempts = append(b.Attempts, &Attempt{ID: newID(), BatchID: b.ID, CreatedAt: b.CreatedAt, CaseID: task.ID, BenchmarkID: task.BenchmarkID, BenchmarkTaskID: task.TaskID, Provenance: task.Provenance, Evaluator: task.Evaluator, VariantID: vid, DisplayName: d.DisplayName, HarnessKind: d.Kind, TrajectoryAvailable: d.TrajectoryAvailable, Model: v.Model, ReasoningEffort: v.ReasoningEffort, PluginMode: d.PluginMode, PluginRevision: d.PluginRevision, Status: "queued"})
 		}
 	}
 	s.mu.Lock()
@@ -449,12 +620,47 @@ func (s *Server) runBatch(id string, variants map[string]run.Variant, workers in
 	s.emit(Event{Type: "batch", BatchID: id, At: time.Now().UTC()})
 }
 func (s *Server) runAttempt(a *Attempt, v run.Variant) {
-	prompt, err := os.ReadFile(filepath.Join(s.cfg.CasesDir, a.CaseID, "prompt.txt"))
+	caseRoot := s.cfg.CasesDir
+	caseID := a.CaseID
+	var benchmarkDir string
+	if a.BenchmarkID != "" {
+		if !safeID(a.BenchmarkID) || !safeID(a.BenchmarkTaskID) || a.CaseID != a.BenchmarkID+"/"+a.BenchmarkTaskID {
+			s.finishAttempt(a, nil, errors.New("invalid benchmark task reference"))
+			return
+		}
+		var pathErr error
+		benchmarkDir, pathErr = s.safeBenchmarkTaskDir(a.BenchmarkID, a.BenchmarkTaskID)
+		if pathErr != nil {
+			s.finishAttempt(a, nil, pathErr)
+			return
+		}
+		caseRoot, caseID = benchmarkDir, "."
+	}
+	promptPath := filepath.Join(caseRoot, caseID, "prompt.txt")
+	fixture := filepath.Join(caseRoot, caseID, "fixture")
+	hidden := filepath.Join(caseRoot, caseID, "hidden")
+	if benchmarkDir != "" {
+		var pathErr error
+		promptPath, pathErr = safeBenchmarkChild(benchmarkDir, "prompt.txt")
+		if pathErr == nil {
+			fixture, pathErr = safeBenchmarkChild(benchmarkDir, "fixture")
+		}
+		if pathErr != nil {
+			s.finishAttempt(a, nil, pathErr)
+			return
+		}
+		if candidate, e := safeBenchmarkChild(benchmarkDir, "hidden"); e == nil {
+			hidden = candidate
+		} else if _, statErr := os.Lstat(filepath.Join(benchmarkDir, "hidden")); statErr == nil {
+			s.finishAttempt(a, nil, e)
+			return
+		}
+	}
+	prompt, err := os.ReadFile(promptPath)
 	if err != nil {
 		s.finishAttempt(a, nil, err)
 		return
 	}
-	fixture := filepath.Join(s.cfg.CasesDir, a.CaseID, "fixture")
 	if _, err = os.Stat(fixture); err != nil {
 		s.finishAttempt(a, nil, errors.New("case fixture is missing"))
 		return
@@ -466,13 +672,12 @@ func (s *Server) runAttempt(a *Attempt, v run.Variant) {
 	s.mu.Unlock()
 	s.persistByID(a.BatchID)
 	s.emit(Event{Type: "attempt", BatchID: a.BatchID, Attempt: copyAttempt(a), At: now})
-	hidden := filepath.Join(s.cfg.CasesDir, a.CaseID, "hidden")
 	_, hasHidden := os.Stat(hidden)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan run.Outcome, 1)
 	go func() {
-		done <- s.cfg.Execute(ctx, v, run.Request{Fixture: fixture, Hidden: hidden, Prompt: string(prompt), CaseID: a.CaseID, Coding: hasHidden == nil, ExportWorkspace: hasHidden != nil})
+		done <- s.cfg.Execute(ctx, v, run.Request{Fixture: fixture, Hidden: hidden, Prompt: string(prompt), CaseID: a.CaseID, BenchmarkID: a.BenchmarkID, BenchmarkTaskID: a.BenchmarkTaskID, Provenance: string(a.Provenance), Evaluator: string(a.Evaluator), Coding: hasHidden == nil, ExportWorkspace: hasHidden != nil})
 	}()
 	tick := time.NewTicker(time.Second)
 	defer tick.Stop()
@@ -489,6 +694,40 @@ func (s *Server) runAttempt(a *Attempt, v run.Variant) {
 		}
 	}
 }
+
+// safeBenchmarkTaskDir rejects symlink escapes before a benchmark is handed to
+// Docker. Local cases retain their existing import-time path protections.
+func (s *Server) safeBenchmarkTaskDir(benchmarkID, taskID string) (string, error) {
+	benchmarkRoot, err := filepath.EvalSymlinks(s.cfg.BenchmarksDir)
+	if err != nil {
+		return "", errors.New("benchmark directory is missing")
+	}
+	suite, err := filepath.EvalSymlinks(filepath.Join(benchmarkRoot, benchmarkID))
+	if err != nil || !pathInside(benchmarkRoot, suite) {
+		return "", errors.New("unsafe benchmark suite path")
+	}
+	root, err := filepath.EvalSymlinks(filepath.Join(suite, "tasks"))
+	if err != nil || !pathInside(suite, root) {
+		return "", errors.New("benchmark tasks directory is missing")
+	}
+	task, err := filepath.EvalSymlinks(filepath.Join(root, taskID))
+	if err != nil || !pathInside(root, task) {
+		return "", errors.New("unsafe benchmark task path")
+	}
+	info, err := os.Stat(task)
+	if err != nil || !info.IsDir() {
+		return "", errors.New("benchmark task is missing")
+	}
+	return task, nil
+}
+
+func safeBenchmarkChild(taskDir, name string) (string, error) {
+	p, err := filepath.EvalSymlinks(filepath.Join(taskDir, name))
+	if err != nil || !pathInside(taskDir, p) {
+		return "", fmt.Errorf("unsafe benchmark %s path", name)
+	}
+	return p, nil
+}
 func (s *Server) finishAttempt(a *Attempt, out *run.Outcome, err error) {
 	t := time.Now().UTC()
 	s.mu.Lock()
@@ -499,6 +738,14 @@ func (s *Server) finishAttempt(a *Attempt, out *run.Outcome, err error) {
 	} else {
 		r := out.Result
 		a.Result = &r
+		a.Verdict = r.Verdict
+		if a.Verdict == "" && r.Status == model.StatusCompleted && r.VerifierPassed != nil {
+			if *r.VerifierPassed {
+				a.Verdict = "pass"
+			} else {
+				a.Verdict = "fail"
+			}
+		}
 		a.Status = string(r.Status)
 		a.ElapsedMillis = r.ElapsedMillis
 		a.Artifact = out.Dir
@@ -874,6 +1121,18 @@ func (s *Server) loadHistory() error {
 		}
 		var x Batch
 		if json.Unmarshal(b, &x) == nil && x.ID != "" {
+			for _, a := range x.Attempts {
+				if a.CreatedAt.IsZero() {
+					a.CreatedAt = x.CreatedAt
+				}
+				if a.Verdict == "" && a.Result != nil && a.Result.Status == model.StatusCompleted && a.Result.VerifierPassed != nil {
+					if *a.Result.VerifierPassed {
+						a.Verdict = "pass"
+					} else {
+						a.Verdict = "fail"
+					}
+				}
+			}
 			if x.Status == "running" || x.Status == "queued" {
 				x.Status = "interrupted"
 				for _, a := range x.Attempts {

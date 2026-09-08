@@ -1,0 +1,1 @@
+{"functions":[{"name":"convert_currency","parameters":{"amount":"number","source":"string","target":"string"}},{"name":"latest_rate","parameters":{"source":"string","target":"string"}}]}

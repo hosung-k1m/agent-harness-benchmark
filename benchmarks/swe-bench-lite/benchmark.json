@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "id": "swe-bench-lite",
+  "name": "SWE-bench Lite (10-Task Sample)",
+  "description": "Ten small, offline repair capsules keyed to SWE-bench Lite upstream-style instance identifiers. These are deliberately curated reproductions, not a redistribution of SWE-bench data or scores.",
+  "provenance": {"name":"SWE-bench Lite","revision":"SWE-bench_Lite@2024-07-15","url":"https://github.com/SWE-bench/SWE-bench","scope":"10 curated capsule reproductions with provenance IDs; no upstream repository fixtures are bundled"},
+  "task_count": 10,
+  "evaluator":{"type":"trusted-hidden-verifier","config":"hidden/verifier.json"},
+  "scoring":{"unit":"tasks","aggregation":"pass_rate","task_pass":"visible_and_hidden_trusted_verifier_pass"},
+  "tasks":[
+    {"id":"django-django-11099","title":"Preserve QueryDict values","path":"tasks/django-django-11099","token_budget":"10k-30k","provenance":{"source_id":"django__django-11099","source_revision":"SWE-bench_Lite@2024-07-15","source_url":"https://github.com/SWE-bench/SWE-bench"}},
+    {"id":"django-django-11815","title":"Normalize URL paths","path":"tasks/django-django-11815","token_budget":"10k-30k","provenance":{"source_id":"django__django-11815","source_revision":"SWE-bench_Lite@2024-07-15","source_url":"https://github.com/SWE-bench/SWE-bench"}},
+    {"id":"sympy-sympy-12419","title":"Simplify numeric signs","path":"tasks/sympy-sympy-12419","token_budget":"10k-30k","provenance":{"source_id":"sympy__sympy-12419","source_revision":"SWE-bench_Lite@2024-07-15","source_url":"https://github.com/SWE-bench/SWE-bench"}},
+    {"id":"sympy-sympy-17630","title":"Handle empty ranges","path":"tasks/sympy-sympy-17630","token_budget":"10k-30k","provenance":{"source_id":"sympy__sympy-17630","source_revision":"SWE-bench_Lite@2024-07-15","source_url":"https://github.com/SWE-bench/SWE-bench"}},
+    {"id":"matplotlib-matplotlib-20826","title":"Respect alpha bounds","path":"tasks/matplotlib-matplotlib-20826","token_budget":"10k-30k","provenance":{"source_id":"matplotlib__matplotlib-20826","source_revision":"SWE-bench_Lite@2024-07-15","source_url":"https://github.com/SWE-bench/SWE-bench"}},
+    {"id":"scikit-learn-scikit-learn-10297","title":"Validate sample weights","path":"tasks/scikit-learn-scikit-learn-10297","token_budget":"10k-30k","provenance":{"source_id":"scikit-learn__scikit-learn-10297","source_revision":"SWE-bench_Lite@2024-07-15","source_url":"https://github.com/SWE-bench/SWE-bench"}},
+    {"id":"pytest-dev-pytest-5221","title":"Format assertion labels","path":"tasks/pytest-dev-pytest-5221","token_budget":"10k-30k","provenance":{"source_id":"pytest-dev__pytest-5221","source_revision":"SWE-bench_Lite@2024-07-15","source_url":"https://github.com/SWE-bench/SWE-bench"}},
+    {"id":"psf-requests-1724","title":"Parse header charset","path":"tasks/psf-requests-1724","token_budget":"10k-30k","provenance":{"source_id":"psf__requests-1724","source_revision":"SWE-bench_Lite@2024-07-15","source_url":"https://github.com/SWE-bench/SWE-bench"}},
+    {"id":"sphinx-doc-sphinx-7440","title":"Deduplicate anchors","path":"tasks/sphinx-doc-sphinx-7440","token_budget":"10k-30k","provenance":{"source_id":"sphinx-doc__sphinx-7440","source_revision":"SWE-bench_Lite@2024-07-15","source_url":"https://github.com/SWE-bench/SWE-bench"}},
+    {"id":"pylint-dev-pylint-5859","title":"Honor ignored names","path":"tasks/pylint-dev-pylint-5859","token_budget":"10k-30k","provenance":{"source_id":"pylint-dev__pylint-5859","source_revision":"SWE-bench_Lite@2024-07-15","source_url":"https://github.com/SWE-bench/SWE-bench"}}
+  ]
+}

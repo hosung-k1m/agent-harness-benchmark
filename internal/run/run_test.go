@@ -145,3 +145,23 @@ func TestPassesSelectedModelAndEffortAsAdapterArguments(t *testing.T) {
 		t.Fatalf("selected model/effort absent from adapter invocation: %#v", f.calls)
 	}
 }
+
+func TestBenchmarkMetadataIsDurablyAnnotated(t *testing.T) {
+	f := &fakeEngine{result: model.Result{Status: model.StatusCompleted, Usage: model.Usage{TokenQuality: model.TokenUnavailable}}}
+	r := Runner{Engine: f, ArtifactRoot: t.TempDir(), Credential: func(string) auth.Provider { return fakeAuth{} }}
+	o := r.Run(context.Background(), testVariant(), Request{Fixture: t.TempDir(), CaseID: "bfcl/get-weather", BenchmarkID: "bfcl", BenchmarkTaskID: "get-weather", Provenance: `{"source_id":"weather-1"}`, Evaluator: `{"type":"trusted-hidden-verifier"}`})
+	if o.Result.BenchmarkID != "bfcl" || o.Result.BenchmarkTaskID != "get-weather" || string(o.Result.Provenance) != `{"source_id":"weather-1"}` || string(o.Result.Evaluator) != `{"type":"trusted-hidden-verifier"}` || o.Result.Validate() != nil {
+		t.Fatalf("annotated result = %#v", o.Result)
+	}
+	b, err := os.ReadFile(filepath.Join(o.Dir, "result.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var persisted model.Result
+	if err := json.Unmarshal(b, &persisted); err != nil {
+		t.Fatal(err)
+	}
+	if persisted.BenchmarkID != o.Result.BenchmarkID || persisted.BenchmarkTaskID != o.Result.BenchmarkTaskID || !json.Valid(persisted.Provenance) || !json.Valid(persisted.Evaluator) || persisted.Validate() != nil {
+		t.Fatalf("persisted result = %#v", persisted)
+	}
+}

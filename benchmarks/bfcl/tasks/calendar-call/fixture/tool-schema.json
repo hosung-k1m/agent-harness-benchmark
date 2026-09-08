@@ -1,0 +1,1 @@
+{"functions":[{"name":"create_event","parameters":{"title":"string","date":"string"}},{"name":"find_event","parameters":{"query":"string"}}]}

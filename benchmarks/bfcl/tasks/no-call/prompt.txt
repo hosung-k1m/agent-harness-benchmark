@@ -1,0 +1,1 @@
+Read `tool-schema.json` and `user-request.txt`. No supplied tool is relevant. Write only `answer.json` with the exact no-call sentinel shape described in the schema. Do not edit supplied files or tests.

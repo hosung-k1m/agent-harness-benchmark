@@ -1,0 +1,1 @@
+Fix `ClampScore` in `score.go`: it must constrain a score inclusively to the requested lower and upper bounds, including when the arguments arrive reversed. Do not change the tests or README.

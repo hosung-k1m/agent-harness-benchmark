@@ -1,0 +1,1 @@
+Fix `src/color.py` so `with_alpha` accepts values from 0 through 1 inclusively and raises ValueError outside that range. Do not edit tests.

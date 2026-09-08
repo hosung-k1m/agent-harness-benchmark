@@ -1,0 +1,1 @@
+Fix `src/label.js`. `formatLabel` must trim the input, collapse internal whitespace, and title-case words while preserving apostrophes. Keep the CommonJS API and do not edit tests or README.

@@ -1,0 +1,1 @@
+Fix `src/assertions.py` so `format_label` uses `name: message` when a name is supplied and otherwise returns the message unchanged. Do not edit tests.

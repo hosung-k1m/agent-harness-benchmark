@@ -11,10 +11,10 @@ RUN pnpm install --frozen-lockfile && pnpm build
 FROM node:22.19.0-bookworm-slim
 ARG CODEX_VERSION=0.151.0
 ARG DSH_COMMIT=0a53fb55bea101816fa226bb964ae2bed71c343b
-RUN apt-get update && apt-get install -y --no-install-recommends python3 coreutils ca-certificates && rm -rf /var/lib/apt/lists/* \
+RUN apt-get update && apt-get install -y --no-install-recommends python3 coreutils ca-certificates git golang-go && rm -rf /var/lib/apt/lists/* \
  && corepack enable && corepack prepare pnpm@11.7.0 --activate \
  && npm install --global --ignore-scripts @openai/codex@${CODEX_VERSION} \
- && useradd --create-home --uid 10001 --shell /usr/sbin/nologin bench
+ && useradd --create-home --uid 10001 --shell /bin/bash bench
 COPY --from=dsh-build /src /opt/dsh
 COPY docker/adapters/ /opt/bench/
 COPY docker/dsh-runtime.sh /usr/local/bin/dsh

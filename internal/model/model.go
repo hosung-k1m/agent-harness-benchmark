@@ -2,6 +2,7 @@
 package model
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -87,17 +88,24 @@ type Result struct {
 	SchemaVersion   string `json:"schema_version,omitempty"`
 	RunID           string `json:"run_id,omitempty"`
 	CaseID          string `json:"case_id,omitempty"`
-	VariantID       string `json:"variant_id,omitempty"`
-	Trial           int    `json:"trial,omitempty"`
-	Model           string `json:"model,omitempty"`
-	ReasoningEffort string `json:"reasoning_effort,omitempty"`
-	NetworkPolicyID string `json:"network_policy_id,omitempty"`
-	Status          Status `json:"status"`
-	ElapsedMillis   int64  `json:"elapsed_millis"`
-	ExitCode        *int   `json:"exit_code"`
-	Usage           Usage  `json:"usage"`
-	VerifierPassed  *bool  `json:"verifier_passed,omitempty"`
-	FailureReason   string `json:"failure_reason,omitempty"`
+	BenchmarkID     string `json:"benchmark_id,omitempty"`
+	BenchmarkTaskID string `json:"benchmark_task_id,omitempty"`
+	// These retain the suite/task manifest metadata without imposing a schema
+	// on third-party benchmark provenance or evaluator configuration.
+	Provenance      json.RawMessage `json:"provenance,omitempty"`
+	Evaluator       json.RawMessage `json:"evaluator,omitempty"`
+	VariantID       string          `json:"variant_id,omitempty"`
+	Trial           int             `json:"trial,omitempty"`
+	Model           string          `json:"model,omitempty"`
+	ReasoningEffort string          `json:"reasoning_effort,omitempty"`
+	NetworkPolicyID string          `json:"network_policy_id,omitempty"`
+	Status          Status          `json:"status"`
+	ElapsedMillis   int64           `json:"elapsed_millis"`
+	ExitCode        *int            `json:"exit_code"`
+	Usage           Usage           `json:"usage"`
+	VerifierPassed  *bool           `json:"verifier_passed,omitempty"`
+	Verdict         string          `json:"verdict,omitempty"`
+	FailureReason   string          `json:"failure_reason,omitempty"`
 }
 
 func (r Result) Validate() error {
@@ -121,6 +129,22 @@ func (r Result) Validate() error {
 	}
 	if r.NetworkPolicyID != "" && r.NetworkPolicyID != "unrestricted-egress-v1" {
 		return fmt.Errorf("unexpected result network policy")
+	}
+	if (r.BenchmarkID == "") != (r.BenchmarkTaskID == "") {
+		return fmt.Errorf("result benchmark id and task id must be paired")
+	}
+	for _, metadata := range []json.RawMessage{r.Provenance, r.Evaluator} {
+		if len(metadata) != 0 && !json.Valid(metadata) {
+			return fmt.Errorf("invalid benchmark metadata")
+		}
+	}
+	if r.Verdict != "" && r.Verdict != "pass" && r.Verdict != "fail" {
+		return fmt.Errorf("invalid deterministic verdict %q", r.Verdict)
+	}
+	if r.Verdict != "" {
+		if r.VerifierPassed == nil || (r.Verdict == "pass") != *r.VerifierPassed {
+			return fmt.Errorf("deterministic verdict does not match verifier result")
+		}
 	}
 	return nil
 }

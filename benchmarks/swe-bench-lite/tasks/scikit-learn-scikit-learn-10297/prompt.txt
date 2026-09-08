@@ -1,0 +1,1 @@
+Fix `src/weights.py` so `validate_weights` returns float weights of exactly `count` items and raises ValueError otherwise. Do not edit tests.

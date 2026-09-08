@@ -15,6 +15,8 @@ test:
 	go test ./...
 	go vet ./...
 	python3 -m unittest discover -s docker/adapters -p 'test_*.py'
+	python3 -m unittest docker/verifier/test_verify.py
+	python3 -m unittest benchmarks/test_oracles.py
 	python3 -m py_compile docker/adapters/normalize.py docker/verifier/verify.py
 	sh -n docker/adapters/codex-adapter.sh docker/adapters/dsh-adapter.sh docker/adapters/archive-workspace.sh
 

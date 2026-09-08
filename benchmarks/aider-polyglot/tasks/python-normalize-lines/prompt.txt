@@ -1,0 +1,1 @@
+Fix `src/textutil.py` so `normalize_lines` converts CRLF and CR line endings to LF, removes trailing whitespace from every line, and preserves a final newline if present. Do not modify tests or README.

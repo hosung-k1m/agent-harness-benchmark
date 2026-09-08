@@ -1,0 +1,1 @@
+Fix `src/headers.py` so `charset` reads a case-insensitive `charset=` parameter and returns its unquoted value, or None when absent. Do not edit tests.

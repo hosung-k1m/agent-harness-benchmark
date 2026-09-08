@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "id": "aider-polyglot",
+  "name": "Aider Polyglot Benchmark — Very Low",
+  "description": "Three small, exercise-style multi-file repair capsules inspired by Aider's polyglot benchmark format.",
+  "provenance": {"name": "Aider polyglot benchmark", "revision": "aider-0.86.1", "url": "https://github.com/Aider-AI/aider", "scope": "curated, offline-compatible capsules; not the upstream benchmark distribution"},
+  "task_count": 3,
+  "evaluator": {"type": "trusted-hidden-verifier", "config": "hidden/verifier.json"},
+  "scoring": {"unit": "tasks", "aggregation": "pass_rate", "task_pass": "visible_and_hidden_trusted_verifier_pass"},
+  "tasks": [
+    {"id":"python-normalize-lines","title":"Normalize line endings","path":"tasks/python-normalize-lines","token_budget":"1k-5k","provenance":{"source_id":"aider-polyglot-python-normalize-lines","source_revision":"aider-0.86.1","source_url":"https://github.com/Aider-AI/aider"}},
+    {"id":"javascript-format-label","title":"Format display labels","path":"tasks/javascript-format-label","token_budget":"1k-5k","provenance":{"source_id":"aider-polyglot-javascript-format-label","source_revision":"aider-0.86.1","source_url":"https://github.com/Aider-AI/aider"}},
+    {"id":"go-clamp-score","title":"Clamp score values","path":"tasks/go-clamp-score","token_budget":"1k-5k","provenance":{"source_id":"aider-polyglot-go-clamp-score","source_revision":"aider-0.86.1","source_url":"https://github.com/Aider-AI/aider"}}
+  ]
+}

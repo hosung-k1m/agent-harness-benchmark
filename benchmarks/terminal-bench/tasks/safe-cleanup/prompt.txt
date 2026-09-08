@@ -1,0 +1,1 @@
+Fix `bin/cleanup.py` so it trims surrounding whitespace and prints only safe temporary filenames ending in `.tmp`. Reject paths containing `/` or `..`, and reject names whose stem before `.tmp` is blank after trimming. Print accepted names in their trimmed form. Do not edit tests.

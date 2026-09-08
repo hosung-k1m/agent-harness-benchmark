@@ -1,0 +1,1 @@
+Fix `src/names.py` so `is_ignored` matches names case-insensitively against the ignore list. Do not edit tests.

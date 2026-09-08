@@ -52,6 +52,23 @@ identifier or hash.
 ./bench compare --case slugify-v1 --trials 3
 ```
 
+## Bundled benchmark packs
+
+The dashboard also discovers four curated packs under `benchmarks/`: **Aider
+Polyglot Benchmark — Very Low** (3 small multi-language tasks), **SWE-bench
+Lite (10-Task Sample)** (exactly 10 offline repair capsules), **Terminal-Bench
+(Small Subset)** (3 short CLI tasks), and **BFCL** (4 micro JSON tool-call
+tasks). Select them in the **Benchmarks** section of the test-case picker.
+Each suite's `benchmark.json` pins its source release and describes its
+provenance. These are compact, reproducible capsules—not the upstream datasets
+or official leaderboard evaluators. Scores are the percentage of selected
+tasks whose visible and hidden trusted checks both pass. The task prompts list
+the expected token scale: ~1k–5k, ~10k–30k, ~5k–15k, and under 2k respectively.
+Every capsule includes a verifier-only oracle overlay under `hidden/oracle/`.
+`make test` proves the untouched fixture deterministically fails and the oracle
+deterministically passes for all 20 tasks. Oracle files are never mounted in an
+agent container.
+
 ## Web dashboard
 
 Build the CLI, then start the local dashboard from the repository root:
@@ -79,10 +96,14 @@ For DSH runs, the selection configures the DSH parent model. The bundled Codex
 subagent provider accepts the selected model but does not expose a separate
 per-run reasoning override for its child.
 
-The live dashboard updates attempt status and elapsed time every second. Token
+The live dashboard updates attempt status and elapsed time every second. Its
+**Benchmark scenario results** panel updates each harness independently as soon
+as that agent finishes; it does not wait for sibling attempts or the batch.
+Final benchmark verdicts are explicit `Pass` or `Fail` values derived only from
+the trusted deterministic verifier and are persisted in `result.json`. Token
 counts remain marked as pending until the provider emits its normalized usage;
-they are never estimated. Completed batches are restored from
-`.bench/batches/` when the server restarts.
+they are never estimated. Completed batches are restored from `.bench/batches/`
+when the server restarts.
 
 Each DSH attempt also exports a bounded, credential-scanned `trajectory.json`
 derived from DSH's durable session events. Open **View trajectory** to filter,
@@ -152,7 +173,12 @@ stored result artifacts used for the summary.
 The verifier rejects absolute/traversal paths, links, devices, sockets, FIFOs,
 oversized archives, and protected README/test changes before running visible
 and hidden Python tests. Its entry point is `docker/verifier/verify.py` and it
-accepts an archive, hidden-assets directory, and output path.
+accepts an archive, hidden-assets directory, and output path. A hidden-owned
+`verifier.json` may select an argv-only Python, Node, or Go test command (no
+shells or task-owned Makefiles); this permits polyglot capsules without making
+the evaluator agent-controlled. The verifier image provides Python, Node, Go,
+and standard build tools; the agent image provides the same build tools needed
+by the bundled Go task.
 
 ## Token caveats and troubleshooting
 

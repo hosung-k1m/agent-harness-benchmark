@@ -1,0 +1,1 @@
+Fix `src/anchors.py` so `unique_anchors` retains first occurrence order while removing duplicate anchors. Do not edit tests.

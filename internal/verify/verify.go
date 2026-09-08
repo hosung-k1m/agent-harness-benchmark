@@ -47,7 +47,8 @@ func (d Docker) Verify(ctx context.Context, archive, hidden, outDir string) (res
 		}
 	}()
 	tmp := "rw,nosuid,nodev,uid=10001,gid=10001,mode=0700,size="
-	_, e := d.Engine.Run(ctx, "create", "--name", name, "--network", "none", "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--pids-limit", "128", "--memory", "512m", "--memory-swap", "512m", "--cpus", "1", "--tmpfs", "/input:"+tmp+"192m", "--tmpfs", "/hidden:"+tmp+"32m", "--tmpfs", "/output:"+tmp+"16m", "--tmpfs", "/tmp:"+tmp+"64m", "--entrypoint", "sleep", d.Image, "infinity")
+	execTmp := "rw,nosuid,nodev,exec,uid=10001,gid=10001,mode=0700,size=192m"
+	_, e := d.Engine.Run(ctx, "create", "--name", name, "--network", "none", "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--pids-limit", "128", "--memory", "512m", "--memory-swap", "512m", "--cpus", "1", "--env", "HOME=/tmp", "--env", "XDG_CACHE_HOME=/tmp/.cache", "--env", "GOCACHE=/exec/go-build", "--env", "GOPATH=/tmp/go", "--env", "GOTMPDIR=/exec", "--tmpfs", "/input:"+tmp+"192m", "--tmpfs", "/hidden:"+tmp+"32m", "--tmpfs", "/output:"+tmp+"16m", "--tmpfs", "/tmp:"+tmp+"64m", "--tmpfs", "/exec:"+execTmp, "--entrypoint", "sleep", d.Image, "infinity")
 	if e != nil {
 		return Result{}, fmt.Errorf("create verifier: %w", e)
 	}

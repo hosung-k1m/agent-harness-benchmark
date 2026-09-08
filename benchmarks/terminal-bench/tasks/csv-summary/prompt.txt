@@ -1,0 +1,1 @@
+Fix `bin/total.py` so its CLI reads CSV rows from stdin, ignores the header, and prints the integer sum of the `amount` column. Do not edit tests.

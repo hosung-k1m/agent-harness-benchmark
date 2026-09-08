@@ -38,8 +38,11 @@ type Variant struct {
 type Request struct {
 	Fixture, Prompt, Hidden string
 	CaseID                  string
-	Trial                   int
-	Coding, ExportWorkspace bool
+	// Benchmark metadata is carried with an attempt so artifact consumers can
+	// distinguish imported benchmark work from locally authored cases.
+	BenchmarkID, BenchmarkTaskID, Provenance, Evaluator string
+	Trial                                               int
+	Coding, ExportWorkspace                             bool
 }
 type Outcome struct {
 	Result        model.Result
@@ -212,11 +215,28 @@ func annotate(result *model.Result, runID string, v Variant, req Request) {
 	result.SchemaVersion = "1"
 	result.RunID = runID
 	result.CaseID = req.CaseID
+	result.BenchmarkID = req.BenchmarkID
+	result.BenchmarkTaskID = req.BenchmarkTaskID
+	result.Provenance = metadataJSON(req.Provenance)
+	result.Evaluator = metadataJSON(req.Evaluator)
 	result.VariantID = v.ID
 	result.Trial = req.Trial
 	result.Model = v.Model
 	result.ReasoningEffort = v.ReasoningEffort
 	result.NetworkPolicyID = v.NetworkPolicyID
+}
+func metadataJSON(value string) json.RawMessage {
+	if value == "" {
+		return nil
+	}
+	data := json.RawMessage(value)
+	if json.Valid(data) {
+		return append(json.RawMessage(nil), data...)
+	}
+	// Request metadata is normally serialized JSON from the catalog. Encoding
+	// unexpected values as strings keeps result.json valid and durable.
+	encoded, _ := json.Marshal(value)
+	return encoded
 }
 func defaultCredential(id string) auth.Provider {
 	if id == "dsh-default-codex" || id == "dsh-modified-codex" {
@@ -307,6 +327,10 @@ func (r Runner) verify(ctx context.Context, name string, v Variant, req Request,
 	if vr.Status == string(model.StatusInfrastructureInvalid) {
 		out.Result.Status = model.StatusInfrastructureInvalid
 		out.Result.FailureReason = vr.Reason
+	} else if vr.VerifierPassed {
+		out.Result.Verdict = "pass"
+	} else {
+		out.Result.Verdict = "fail"
 	}
 	_ = writeJSON(filepath.Join(out.Dir, "verifier-result.json"), vr)
 }

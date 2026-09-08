@@ -1,0 +1,1 @@
+Fix `src/query.py` so `first_value` returns the first stored value for a key, returns `None` when the key exists with an empty value list, and returns the supplied default only when the key is absent. Do not edit tests.

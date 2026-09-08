@@ -1,0 +1,1 @@
+Fix `bin/count_matches.py` so its CLI prints the number of input lines containing the supplied needle, case-insensitively. Do not edit tests.

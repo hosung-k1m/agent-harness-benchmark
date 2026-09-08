@@ -1,0 +1,1 @@
+Read `tool-schema.json` and `user-request.txt`. Write only `answer.json`, an object with `name` and `arguments`, selecting the appropriate function call. Do not edit supplied files or tests.

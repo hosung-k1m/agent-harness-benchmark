@@ -1,0 +1,14 @@
+package score
+
+func ClampScore(value, lower, upper int) int {
+	if lower > upper {
+		lower, upper = upper, lower
+	}
+	if value < lower {
+		return lower
+	}
+	if value > upper {
+		return upper
+	}
+	return value
+}

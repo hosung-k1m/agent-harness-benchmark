@@ -12,6 +12,39 @@ def fail(reason):
 def digest(p):
     return hashlib.sha256(p.read_bytes()).hexdigest()
 protected = json.loads((hidden/'protected-hashes.json').read_text())
+
+def load_command_config():
+    """Load an optional hidden-owned, argv-only verifier configuration.
+
+    Commands are deliberately lists, not shell snippets: task data can choose
+    a language runner without gaining shell interpolation or access to the
+    agent workspace before the protected-file gate has passed.
+    """
+    default = {
+        'visible_command': ['python3', '-m', 'unittest', 'discover', '-s', 'tests'],
+        'hidden_command': ['python3', '-m', 'unittest', 'discover', '-s', '{hidden_tests}'],
+        'timeout_seconds': 30,
+    }
+    config_path = hidden / 'verifier.json'
+    if not config_path.exists(): return default
+    try:
+        config = json.loads(config_path.read_text())
+        if not isinstance(config, dict): raise ValueError('must be an object')
+        for key in ('visible_command', 'hidden_command'):
+            value = config.get(key, default[key])
+            if not isinstance(value, list) or not value or not all(isinstance(x, str) and x and '\x00' not in x for x in value):
+                raise ValueError(key + ' must be a non-empty argv list')
+            if value[0] not in {'python3', 'node', 'go'}:
+                raise ValueError(key + ' uses a disallowed executable')
+            config[key] = value
+        timeout = config.get('timeout_seconds', default['timeout_seconds'])
+        if not isinstance(timeout, int) or not 1 <= timeout <= 60: raise ValueError('timeout_seconds must be 1..60')
+        config['timeout_seconds'] = timeout
+        return config
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        fail('invalid hidden verifier config: ' + str(exc))
+
+config = load_command_config()
 with tarfile.open(archive, 'r:*') as tf:
     members = tf.getmembers()
     if len(members) > MAX_ENTRIES: fail('archive has too many entries')
@@ -60,7 +93,7 @@ with tarfile.open(archive, 'r:*') as tf:
         expected_directory_files = {p for p in expected_files if any(p.startswith(d + '/') for d in expected_dirs)}
         if actual_files != expected_directory_files or actual_dirs != expected_dirs: fail('protected directory changed')
         try:
-            tests = subprocess.run(['python3','-m','unittest','discover','-s','tests'], cwd=ws, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=30)
+            tests = subprocess.run(config['visible_command'], cwd=ws, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=config['timeout_seconds'])
         except subprocess.TimeoutExpired as exc:
             logs.append((exc.stdout or '')[-8192:] if isinstance(exc.stdout, str) else '')
             fail('visible tests timed out')
@@ -68,7 +101,8 @@ with tarfile.open(archive, 'r:*') as tf:
         # hidden tests stay solely inside this verifier image.
         htests = pathlib.Path(td)/'hidden'; shutil.copytree(hidden/'tests', htests)
         try:
-            hidden_run = subprocess.run(['python3','-m','unittest','discover','-s',str(htests)], cwd=ws, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=30)
+            hidden_command = [part.replace('{hidden_tests}', str(htests)) for part in config['hidden_command']]
+            hidden_run = subprocess.run(hidden_command, cwd=ws, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=config['timeout_seconds'])
         except subprocess.TimeoutExpired as exc:
             logs.append((exc.stdout or '')[-8192:] if isinstance(exc.stdout, str) else '')
             fail('hidden tests timed out')

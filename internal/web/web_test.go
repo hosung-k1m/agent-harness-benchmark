@@ -164,6 +164,80 @@ func TestTrajectoryComparisonIgnoresVolatileEventMetadata(t *testing.T) {
 	}
 }
 
+func TestAttemptVerdictIsPublishedBeforeSiblingAgentFinishes(t *testing.T) {
+	started := make(chan string, 2)
+	releases := map[string]chan struct{}{"one": make(chan struct{}), "two": make(chan struct{})}
+	s, h, _ := newTestServer(t, func(_ context.Context, _ run.Variant, req run.Request) run.Outcome {
+		started <- req.CaseID
+		<-releases[req.CaseID]
+		passed := true
+		return run.Outcome{Dir: "artifact-" + req.CaseID, Result: model.Result{Status: model.StatusCompleted, VerifierPassed: &passed, Usage: model.Usage{TokenQuality: model.TokenUnavailable}}}
+	})
+
+	request := httptest.NewRequest(http.MethodPost, "/api/runs", strings.NewReader(`{"harness_ids":["codex-cli"],"case_ids":["one","two"],"workers":2}`))
+	response := httptest.NewRecorder()
+	h.ServeHTTP(response, request)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("create batch: %d %s", response.Code, response.Body.String())
+	}
+	var batch Batch
+	if err := json.NewDecoder(response.Body).Decode(&batch); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatal("agents did not start")
+		}
+	}
+
+	events := make(chan Event, 8)
+	s.mu.Lock()
+	s.subs[events] = struct{}{}
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		delete(s.subs, events)
+		s.mu.Unlock()
+	}()
+
+	close(releases["one"])
+	var completed *Attempt
+	deadline := time.After(time.Second)
+	for completed == nil {
+		select {
+		case event := <-events:
+			if event.Type == "attempt" && event.Attempt != nil && event.Attempt.CaseID == "one" && event.Attempt.Result != nil {
+				completed = event.Attempt
+			}
+		case <-deadline:
+			t.Fatal("completed attempt was not published")
+		}
+	}
+	if completed.Verdict != "pass" || completed.Result.VerifierPassed == nil || !*completed.Result.VerifierPassed {
+		t.Fatalf("published result = %#v", completed)
+	}
+	s.mu.RLock()
+	batchStatus := s.batches[batch.ID].Status
+	secondStatus := s.batches[batch.ID].Attempts[1].Status
+	s.mu.RUnlock()
+	if batchStatus != "running" || secondStatus != "running" {
+		t.Fatalf("completion waited for sibling: batch=%s sibling=%s", batchStatus, secondStatus)
+	}
+
+	close(releases["two"])
+	for limit := time.Now().Add(time.Second); time.Now().Before(limit); {
+		s.mu.RLock()
+		done := s.batches[batch.ID].Status == "completed"
+		s.mu.RUnlock()
+		if done {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 func newTestServer(t *testing.T, execute func(context.Context, run.Variant, run.Request) run.Outcome) (*Server, http.Handler, string) {
 	t.Helper()
 	root := t.TempDir()
@@ -220,6 +294,122 @@ func TestBatchCreatesIndependentCrossProductAttempts(t *testing.T) {
 	defer mu.Unlock()
 	if len(got) != 4 {
 		t.Fatalf("not independent cross product: %#v", got)
+	}
+}
+
+func TestBenchmarkCatalogAndBatchSelection(t *testing.T) {
+	root := t.TempDir()
+	old, _ := os.Getwd()
+	defer os.Chdir(old)
+	if err := os.Chdir(root); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir("variants", 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join("variants", "codex-cli.json"), []byte("{}"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	var received []run.Request
+	var calls int
+	s, h, cases := newTestServer(t, func(_ context.Context, _ run.Variant, request run.Request) run.Outcome {
+		mu.Lock()
+		received = append(received, request)
+		calls++
+		mu.Unlock()
+		return run.Outcome{Dir: "artifact", Result: model.Result{Status: model.StatusCompleted, Usage: model.Usage{TokenQuality: model.TokenUnavailable}}}
+	})
+	benchmarks := filepath.Join(filepath.Dir(cases), "benchmarks")
+	task := filepath.Join(benchmarks, "bfcl", "tasks", "get-weather")
+	if err := os.MkdirAll(filepath.Join(task, "fixture"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(task, "hidden"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(task, "prompt.txt"), []byte("call get_weather"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	manifest := `{"schema_version":1,"id":"bfcl","name":"BFCL","task_count":99,"upstream":{"name":"Berkeley","revision":"abc"},"evaluator":{"type":"trusted-hidden-verifier"},"tasks":[{"id":"get-weather","title":"Get weather","path":"tasks/get-weather","token_budget":"micro","provenance":{"source_id":"weather-1"}}]}`
+	if err := os.MkdirAll(filepath.Join(benchmarks, "bfcl"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(benchmarks, "bfcl", "benchmark.json"), []byte(manifest), 0600); err != nil {
+		t.Fatal(err)
+	}
+	s.cfg.BenchmarksDir = benchmarks
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/catalog", nil))
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"task_count":1`) || !strings.Contains(w.Body.String(), `"task_id":"get-weather"`) || !strings.Contains(w.Body.String(), `"token_budget":"micro"`) || !strings.Contains(w.Body.String(), `"provenance":{"source_id":"weather-1"}`) {
+		t.Fatalf("benchmark catalog: %d %s", w.Code, w.Body.String())
+	}
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/api/runs", strings.NewReader(`{"harness_ids":["codex-cli"],"case_ids":["one"],"benchmark_task_ids":["bfcl/get-weather"]}`)))
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create benchmark batch: %d %s", w.Code, w.Body.String())
+	}
+	var batch Batch
+	if err := json.NewDecoder(w.Body).Decode(&batch); err != nil {
+		t.Fatal(err)
+	}
+	if len(batch.Attempts) != 2 {
+		t.Fatalf("attempts = %#v", batch.Attempts)
+	}
+	var benchmarkAttempt *Attempt
+	for _, attempt := range batch.Attempts {
+		if attempt.BenchmarkID == "bfcl" {
+			benchmarkAttempt = attempt
+		}
+	}
+	if benchmarkAttempt == nil || benchmarkAttempt.BenchmarkTaskID != "get-weather" || benchmarkAttempt.CaseID != "bfcl/get-weather" {
+		t.Fatalf("benchmark attempt = %#v", benchmarkAttempt)
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		mu.Lock()
+		count := calls
+		mu.Unlock()
+		if count >= 2 || !time.Now().Before(deadline) {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	var benchmarkRequest *run.Request
+	for i := range received {
+		if received[i].BenchmarkID == "bfcl" {
+			benchmarkRequest = &received[i]
+		}
+	}
+	wantHidden, err := filepath.EvalSymlinks(filepath.Join(task, "hidden"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 || benchmarkRequest == nil || benchmarkRequest.BenchmarkTaskID != "get-weather" || benchmarkRequest.Hidden != wantHidden || !benchmarkRequest.Coding {
+		t.Fatalf("runner requests = %#v, calls=%d", received, calls)
+	}
+	bad := httptest.NewRecorder()
+	h.ServeHTTP(bad, httptest.NewRequest(http.MethodPost, "/api/runs", strings.NewReader(`{"harness_ids":["codex-cli"],"benchmark_task_ids":["bfcl/nope"]}`)))
+	if bad.Code != http.StatusBadRequest {
+		t.Fatalf("unknown benchmark task: %d %s", bad.Code, bad.Body.String())
+	}
+}
+
+func TestBenchmarkTaskPathRejectsSymlinkEscape(t *testing.T) {
+	s, _, _ := newTestServer(t, func(context.Context, run.Variant, run.Request) run.Outcome { return run.Outcome{} })
+	root := t.TempDir()
+	s.cfg.BenchmarksDir = root
+	if err := os.MkdirAll(filepath.Join(root, "bfcl", "tasks"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	external := t.TempDir()
+	if err := os.Symlink(external, filepath.Join(root, "bfcl", "tasks", "escaped")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.safeBenchmarkTaskDir("bfcl", "escaped"); err == nil {
+		t.Fatal("symlink escape was accepted")
 	}
 }
 func TestImportRejectsTraversalAndLeavesNoCase(t *testing.T) {
